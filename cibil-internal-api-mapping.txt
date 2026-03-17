@@ -1,0 +1,33 @@
+{
+    "nbId": 23936,   no mapping
+    "appName": "DIGIBANCA",      p_in_obj_1	STRINGVAL1
+    "applicationNumber": "8500176605",   //p_in_obj_1	STRINGVAL6
+    "isCibilBypass": "False",    //p_in_obj_4	STRINGVAL76
+    "basicDetailsDto": [
+        {
+            "applicantFirstName": "SANKET",   //p_in_obj_1	STRINGVAL13
+            "applicantLastName": "MAHAJAN",   // p_in_obj_1	STRINGVAL15
+            "gender": "MALE",       //p_in_obj_1	STRINGVAL18
+            "applicantMiddleName": "CHANDRASHEKHAR",   //p_in_obj_1	STRINGVAL14
+            "dateOfBirth": "07042000",        //p_in_obj_1	STRINGVAL16
+            "idNumber": "DZHPM1515B",
+            "idType": "01",    ??? from where will we get all idType
+            "mobileNo": "8550983851",     //p_in_obj_1	STRINGVAL19
+            "ipPhType": "PH",        
+            "emailAddress": "",           //p_in_obj_1	STRINGVAL20
+            "residenceType": "01", ??? from where will we get all the residenceType and addresstype list 
+            "addressType": "02",    ??? from where will we get all the residenceType and addresstype list 
+            "addressLine2": "chinchwad gaon",  //p_in_obj_1	STRINGVAL57
+            "addressLine1": "s no 61 plot no 23 shiv nagre",     //p_in_obj_1	STRINGVAL56
+            "city": "PUNE",    //p_in_obj_1	STRINGVAL61
+            "pinCode": "411033",    //p_in_obj_1	STRINGVAL55
+            "addressLine3": "near ganpati mandir",      //p_in_obj_1	STRINGVAL58
+            "amount": 100000,   ??? which amount 
+            "stateCode": "27",     // p_in_obj_1	STRINGVAL62     ??? from where will we get all the state code list 
+            "gstStateCode": "27"    // p_in_obj_1	STRINGVAL62     ??? from where will we get all the state code list
+        }
+    ],
+    "ipPhSame": "Y",    // p_in_obj_1	STRINGVAL9
+    "isMinorLife": false,   no mapping
+    "isWop": true    no mapping
+}
