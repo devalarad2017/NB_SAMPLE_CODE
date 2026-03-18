@@ -1,0 +1,24 @@
+private void addPrefixedList(Map<String, String> target, String prefix, PInList listObj) {
+    if (listObj == null) return;
+    List<WeoRecStrings150User> records = listObj.getWeoRecStrings150User();
+    if (records == null) return;
+
+    for (int i = 0; i < records.size(); i++) {
+        Map<String, String> recordValues = records.get(i).getValues();
+        if (recordValues == null) continue;
+
+        String recordPrefix = prefix + "[" + i + "]";
+        for (Map.Entry<String, String> entry : recordValues.entrySet()) {
+            target.put(recordPrefix + "." + entry.getKey(), entry.getValue());
+        }
+    }
+}
+
+@Setter
+@Getter
+@JsonIgnoreProperties(ignoreUnknown = true)
+public static class PInList {
+
+    @JsonProperty("WeoRecStrings150User")
+    private List<WeoRecStrings150User> weoRecStrings150User;
+}
