@@ -1,6 +1,6 @@
 package com.insurance.newbusiness.pas;
 
-import com.insurance.newbusiness.integration.model.proposal.ProposalResponse;
+import com.insurance.newbusiness.integration.model.pas.*;
 import com.insurance.newbusiness.journey.JourneyContext;
 import com.insurance.newbusiness.tracking.JourneyTrackingService;
 import org.slf4j.Logger;
@@ -12,7 +12,7 @@ import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.Map;
 
 /**
@@ -58,7 +58,7 @@ public class PasApiClient {
         log.info("[{}] Submitting to PAS | url={}", context.getCorrelationId(), pasUrl);
 
         try {
-            Map<String, Object> pasRequest = buildPasRequest(context);
+            PasRequest pasRequest = buildPasRequest(context);
 
             @SuppressWarnings("unchecked")
             Map<String, Object> response = restTemplate.postForObject(
@@ -93,49 +93,94 @@ public class PasApiClient {
     }
 
     /**
-     * Assembles PAS request from all prior journey results.
+     * Assembles PAS request from all prior journey results using typed PasRequest POJO.
      *
      * Sources:
      *   context.getRawParams()            — original partner params
      *   context.getXxxResult()            — typed results from each prior stage
-     *
-     * TODO: Replace placeholder assignments with actual PAS API contract fields.
-     * PAS likely needs a hierarchical JSON structure — consider creating a
-     * PasRequest POJO with nested objects if PAS contract is complex.
      */
-    private Map<String, Object> buildPasRequest(JourneyContext context) {
-        Map<String, Object> request = new LinkedHashMap<>();
+    private PasRequest buildPasRequest(JourneyContext context) {
+        PasRequest pasRequest = new PasRequest();
+        Map<String, String> raw = context.getRawParams();
 
-        // From partner raw params
-        request.put("correlationId", context.getCorrelationId());
-        request.put("partnerCode",   context.getPartnerCode());
-        request.put("applicantName", context.getRawParams().get("stringval1")); // TODO: map correctly
+        // Build header
+        PasHeader header = new PasHeader();
+        header.setCorrelationId(context.getCorrelationId());
+        ProcessVars processVars = new ProcessVars();
+        header.setProcessVars(processVars);
+        pasRequest.setHeader(header);
 
-        // From proposal stage
+        // Build request body
+        PasRequestBody body = new PasRequestBody();
+
+        // Set proposal number from proposal stage
         if (context.getProposalResult() != null) {
-            request.put("proposalNumber", context.getProposalResult().getProposalNumber());
+            body.setProposalNumber(context.getProposalResult().getProposalNumber());
         }
 
-        // From premium calculation
-        if (context.getPremiumResult() != null) {
-            request.put("calculatedPremium", context.getPremiumResult().getCalculatedPremium());
-            request.put("premiumFrequency",  context.getPremiumResult().getFrequency());
-        }
+        // Build policyCheckIn
+        PolicyCheckIn policyCheckIn = new PolicyCheckIn();
+
+        // Basic policy insured from raw params
+        BasicPolicyInsured insured = new BasicPolicyInsured();
+        insured.setPolicyInsuredFirstName(raw.get("stringval1"));
+        insured.setPolicyInsuredLastName(raw.get("stringval2"));
+        insured.setPolicyInsuredMiddleName(raw.get("stringval3"));
+        insured.setGender(raw.get("stringval5"));
+        insured.setSalutation(raw.get("stringval6"));
+        insured.setPolicyInsuredDateOfBirth(raw.get("stringval4"));
+        ArrayList<BasicPolicyInsured> insuredList = new ArrayList<>();
+        insuredList.add(insured);
+        policyCheckIn.setBasicPolicyInsured(insuredList);
+
+        // Product selection
+        ProductSelectionDetails productSelection = new ProductSelectionDetails();
+        productSelection.setBaseCoverageCode(raw.get("stringval50"));
+        policyCheckIn.setProductSelection(productSelection);
+
+        // Bank details
+        BankDetailsDTO bankDetails = new BankDetailsDTO();
+        policyCheckIn.setBankDetailsDTO(bankDetails);
+
+        // Integration results from prior stages
+        ArrayList<IntegrationDetail> integrations = new ArrayList<>();
 
         // From underwriting
         if (context.getUnderwritingResult() != null) {
-            request.put("underwritingDecision", context.getUnderwritingResult().getDecision());
-            request.put("underwritingConditions", context.getUnderwritingResult().getConditions());
+            IntegrationDetail uwIntegration = new IntegrationDetail();
+            uwIntegration.setIntegrationName("AWS");
+            uwIntegration.setIntegrationStatus(true);
+            integrations.add(uwIntegration);
         }
 
-        // From medical
+        policyCheckIn.setIntegrations(integrations);
+
+        // Journey details
+        JourneyDetails journeyDetails = new JourneyDetails();
+        policyCheckIn.setJourneyDetails(journeyDetails);
+
+        // Product details from premium calculation
+        ProductDetailsDTO productDetails = new ProductDetailsDTO();
+        if (context.getPremiumResult() != null) {
+            productDetails.setPremiumAmount(
+                    context.getPremiumResult().getCalculatedPremium() != null
+                            ? context.getPremiumResult().getCalculatedPremium().toPlainString() : null);
+            productDetails.setPremFrequency(context.getPremiumResult().getFrequency());
+        }
+        policyCheckIn.setProductDetailsDTO(productDetails);
+
+        // Medical results
         if (context.getMedicalResult() != null) {
-            request.put("medicalStatus",   context.getMedicalResult().getStatus());
-            request.put("riskCategory",    context.getMedicalResult().getRiskCategory());
-            request.put("loadingFactor",   context.getMedicalResult().getLoadingFactor());
+            IntegrationDetail mrsIntegration = new IntegrationDetail();
+            mrsIntegration.setIntegrationName("MRS");
+            mrsIntegration.setIntegrationStatus(true);
+            integrations.add(mrsIntegration);
         }
 
-        // TODO: add all remaining fields required by PAS API contract
-        return request;
+        body.setPolicyCheckIn(policyCheckIn);
+        body.setStatus("DRAFT");
+        pasRequest.setRequest(body);
+
+        return pasRequest;
     }
 }
