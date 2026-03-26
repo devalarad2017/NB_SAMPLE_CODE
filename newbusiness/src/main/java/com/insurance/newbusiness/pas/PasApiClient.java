@@ -55,32 +55,47 @@ public class PasApiClient {
                backoff = @Backoff(delay = 3000, multiplier = 2))
     public String submitAndGetApplicationNumber(JourneyContext context) {
         long start = System.currentTimeMillis();
-        log.info("[{}] Submitting to PAS | url={}", context.getCorrelationId(), pasUrl);
+        log.info("[{}] PAS Push 1 (App Generation) | url={}", context.getCorrelationId(), pasUrl);
 
         try {
             PasRequest pasRequest = buildPasRequest(context);
 
+            // ── PUSH 1: Generate application number ──────────────────────────
             @SuppressWarnings("unchecked")
-            Map<String, Object> response = restTemplate.postForObject(
+            Map<String, Object> firstResponse = restTemplate.postForObject(
                     pasUrl, pasRequest, Map.class);
 
-            long duration = System.currentTimeMillis() - start;
+            Long applicationId = extractApplicationId(firstResponse);
 
-            // TODO: replace "applicationNumber" with actual PAS response field name
-            String applicationNumber = response != null
-                    ? (String) response.get("applicationNumber") : null;
-
-            if (applicationNumber == null || applicationNumber.trim().isEmpty()) {
-                throw new RuntimeException("PAS returned empty or null applicationNumber");
+            if (applicationId == null) {
+                throw new RuntimeException("PAS Push 1 returned null applicationId");
             }
 
-            trackingService.logApiCall(context, STAGE, API_NAME,
-                    pasRequest, response, "SUCCESS", null, null, duration);
+            long push1Duration = System.currentTimeMillis() - start;
+            trackingService.logApiCall(context, STAGE, API_NAME + "_PUSH1",
+                    pasRequest, firstResponse, "SUCCESS", null, null, push1Duration);
+            log.info("[{}] PAS Push 1 SUCCESS | applicationId={} | {}ms",
+                    context.getCorrelationId(), applicationId, push1Duration);
 
-            log.info("[{}] PAS SUCCESS | applicationNumber={} | {}ms",
-                    context.getCorrelationId(), applicationNumber, duration);
+            // ── PUSH 2: Submit application with generated applicationId ───────
+            long push2Start = System.currentTimeMillis();
+            log.info("[{}] PAS Push 2 (App Submission) | applicationId={}",
+                    context.getCorrelationId(), applicationId);
 
-            return applicationNumber;
+            pasRequest.getRequest().setApplicationId(applicationId);
+            pasRequest.getRequest().getPolicyCheckIn().setAppGeneratedByNb(true);
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> secondResponse = restTemplate.postForObject(
+                    pasUrl, pasRequest, Map.class);
+
+            long push2Duration = System.currentTimeMillis() - push2Start;
+            trackingService.logApiCall(context, STAGE, API_NAME + "_PUSH2",
+                    pasRequest, secondResponse, "SUCCESS", null, null, push2Duration);
+            log.info("[{}] PAS Push 2 SUCCESS | applicationId={} | {}ms",
+                    context.getCorrelationId(), applicationId, push2Duration);
+
+            return String.valueOf(applicationId);
 
         } catch (RuntimeException ex) {
             long duration = System.currentTimeMillis() - start;
@@ -90,6 +105,16 @@ public class PasApiClient {
                     context.getCorrelationId(), duration, ex.getMessage());
             throw ex;
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Long extractApplicationId(Map<String, Object> response) {
+        if (response == null) return null;
+        Map<String, Object> inner = (Map<String, Object>) response.get("response");
+        if (inner == null) return null;
+        Object id = inner.get("applicationId");
+        if (id instanceof Number) return ((Number) id).longValue();
+        return null;
     }
 
     /**
