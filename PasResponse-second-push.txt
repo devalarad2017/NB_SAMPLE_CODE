@@ -1,0 +1,13 @@
+{
+    "header": {},
+    "response": {
+        "backdatedPolicyAllowed": false,
+        "chapterDetails": [],
+        "policyCheckIn": {
+            "message": "Application number/ Proposal number already submitted",
+            "appGeneratedByNb": false
+        },
+        "status": "DRAFT"
+    },
+    "faults": []
+}
