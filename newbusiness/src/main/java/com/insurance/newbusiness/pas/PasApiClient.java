@@ -13,7 +13,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.ArrayList;
-import java.util.Map;
 
 /**
  * PasApiClient — dedicated class for Policy Administration System submission.
@@ -61,11 +60,14 @@ public class PasApiClient {
             PasRequest pasRequest = buildPasRequest(context);
 
             // ── PUSH 1: Generate application number ──────────────────────────
-            @SuppressWarnings("unchecked")
-            Map<String, Object> firstResponse = restTemplate.postForObject(
-                    pasUrl, pasRequest, Map.class);
+            PasResponse firstResponse = restTemplate.postForObject(
+                    pasUrl, pasRequest, PasResponse.class);
 
-            Long applicationId = extractApplicationId(firstResponse);
+            if (firstResponse == null || firstResponse.getResponse() == null) {
+                throw new RuntimeException("PAS Push 1 returned null response");
+            }
+
+            Long applicationId = firstResponse.getResponse().getApplicationId();
 
             if (applicationId == null) {
                 throw new RuntimeException("PAS Push 1 returned null applicationId");
@@ -85,9 +87,8 @@ public class PasApiClient {
             pasRequest.getRequest().setApplicationId(applicationId);
             pasRequest.getRequest().getPolicyCheckIn().setAppGeneratedByNb(true);
 
-            @SuppressWarnings("unchecked")
-            Map<String, Object> secondResponse = restTemplate.postForObject(
-                    pasUrl, pasRequest, Map.class);
+            PasResponse secondResponse = restTemplate.postForObject(
+                    pasUrl, pasRequest, PasResponse.class);
 
             long push2Duration = System.currentTimeMillis() - push2Start;
             trackingService.logApiCall(context, STAGE, API_NAME + "_PUSH2",
@@ -105,16 +106,6 @@ public class PasApiClient {
                     context.getCorrelationId(), duration, ex.getMessage());
             throw ex;
         }
-    }
-
-    @SuppressWarnings("unchecked")
-    private Long extractApplicationId(Map<String, Object> response) {
-        if (response == null) return null;
-        Map<String, Object> inner = (Map<String, Object>) response.get("response");
-        if (inner == null) return null;
-        Object id = inner.get("applicationId");
-        if (id instanceof Number) return ((Number) id).longValue();
-        return null;
     }
 
     /**
