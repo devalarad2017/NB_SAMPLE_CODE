@@ -1,0 +1,61 @@
+{
+    "header": {},
+    "response": {
+        "applicationId": 8500188119,
+        "proposalNumber": "10000172249",
+        "backdatedPolicyAllowed": false,
+        "chapterDetails": [
+            {
+                "type": "NBF_TEMPLATE",
+                "templateCode": "NGIN_NBF_TEMPLATE_ENDOW_IND_001"
+            },
+            {
+                "type": "MEDICAL_TEMPLATE",
+                "templateCode": "NGIN_MEDICAL_TEMPLATE_ENDOW_IND_001"
+            },
+            {
+                "type": "FINANCIAL_TEMPLATE",
+                "templateCode": "NGIN_FINANCIAL_TEMPLATE_ENDOW_IND_001"
+            }
+        ],
+        "policyCheckIn": {
+            "importantDates": {
+                "riskEffectiveDate": "2026-03-20T16:34:15.068+0530",
+                "policyCheckInDate": "2026-03-26T16:57:11.320+0530",
+                "policyIssueDate": "2026-03-20T16:34:15.068+0530",
+                "policyReceivedDate": "2026-03-20T16:34:15.068+0530",
+                "policySignedDate": "2026-03-20T16:34:15.068+0530",
+                "policyYearDate": "2026-03-20T16:34:15.068+0530"
+            },
+            "productSelection": {
+                "baseCoverageCode": "COV_BAS",
+                "productPlan": "309",
+                "productType": "ENDOW",
+                "policyIssueState": "MH",
+                "branchCode": "P00"
+            },
+            "policySelection": {
+                "kartaInsurable": false,
+                "isEmployee": false,
+                "policyType": "INDIVIDUAL"
+            },
+            "source": "NBF",
+            "basicPolicyInsured": [
+                {
+                    "partyReferenceId": "IND-6A90V4THOULR",
+                    "salutation": "MR",
+                    "gender": "MALE",
+                    "policyInsuredDateOfBirth": "1993-01-01T00:00:00.000+0530",
+                    "policyInsuredFirstName": "TEST",
+                    "policyInsuredMiddleName": "K",
+                    "policyInsuredLastName": "J",
+                    "policyInsuredLegalIdentifierCode": "OTHERS",
+                    "policyInsuredLegalIdentifierValue": "1774524430936179_XXXXXXX8988"
+                }
+            ],
+            "appGeneratedByNb": false
+        },
+        "status": "DRAFT"
+    },
+    "faults": []
+}
