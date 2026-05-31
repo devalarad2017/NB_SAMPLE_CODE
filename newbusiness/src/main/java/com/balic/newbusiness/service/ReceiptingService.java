@@ -11,10 +11,10 @@ import com.balic.newbusiness.integration.model.receipting.ReceiptingRequest;
 import com.balic.newbusiness.journey.JourneyContext;
 import com.balic.newbusiness.tracking.JourneyTrackingService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalTime;
@@ -22,14 +22,15 @@ import java.util.*;
 
 
 @Service
+@RequiredArgsConstructor
 public class ReceiptingService {
 
     private static final Logger log = LoggerFactory.getLogger(ReceiptingService.class);
 
-    @Autowired private ObjectMapper objectMapper;
-    @Autowired private ReceiptingApiClient receiptingApiClient;
-    @Autowired private JourneyTrackingService trackingService;
-    @Autowired private ReceiptingApiClient receiptingApiClient1;
+    private final ObjectMapper objectMapper;
+    private final ReceiptingApiClient receiptingApiClient;
+    private final JourneyTrackingService trackingService;
+    private final ReceiptingApiClient receiptingApiClient1;
 
     public ReceiptingResponse receiveAndAcknowledge(InboundReceiptingRequest receiptingRequest) {
         String correlationId = UUID.randomUUID().toString();
@@ -113,10 +114,12 @@ public class ReceiptingService {
         // Call RECEIPTING API
         context.setReceiptingResult(receiptingApiClient.call(receiptingRequest, context));
 
-        log.info("[{}] RECEIPTING complete | score={} status={}",
+        // Log the receipting outcome. (Previously logged context.getCibilResult()[0] here,
+        // but the receipting flow never calls CIBIL — that was a guaranteed NPE.)
+        var receiptingResult = context.getReceiptingResult();
+        log.info("[{}] RECEIPTING complete | receiptNo={}",
                 context.getCorrelationId(),
-                context.getCibilResult()[0].getCibilId(),
-                context.getCibilResult()[0].getCibilStatus());
+                receiptingResult != null ? receiptingResult.getReceiptNo() : null);
     }
 
     public static String buildFullName(String firstName, String middleName, String lastName) {

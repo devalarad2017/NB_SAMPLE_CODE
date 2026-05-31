@@ -1,19 +1,28 @@
 package com.balic.newbusiness.service;
 
 import com.balic.newbusiness.domain.dto.InboundRequest;
+import com.balic.newbusiness.domain.dto.JourneyStatusResponse;
+import com.balic.newbusiness.domain.entity.JourneyExecution;
+import com.balic.newbusiness.domain.entity.JourneyStageLog;
 import com.balic.newbusiness.domain.entity.RawRequest;
 import com.balic.newbusiness.journey.JourneyContext;
 import com.balic.newbusiness.journey.JourneyOrchestrator;
 import com.balic.newbusiness.pas.PasApiClient;
+import com.balic.newbusiness.repository.JourneyExecutionRepository;
+import com.balic.newbusiness.repository.JourneyStageLogRepository;
 import com.balic.newbusiness.repository.RawRequestRepository;
 import com.balic.newbusiness.reversefeed.PartnerNotifierFactory;
 import com.balic.newbusiness.tracking.JourneyTrackingService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.List;
+
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -52,16 +61,34 @@ import java.util.UUID;
  */
 
 @Service
+@RequiredArgsConstructor
 public class NewBusinessService {
 
     private static final Logger log = LoggerFactory.getLogger(NewBusinessService.class);
 
-    @Autowired private RawRequestRepository   rawRequestRepository;
-    @Autowired private JourneyTrackingService  trackingService;
-    @Autowired private JourneyOrchestrator     journeyOrchestrator;
-    @Autowired private PasApiClient            pasApiClient;
-    @Autowired private PartnerNotifierFactory  notifierFactory;
-    @Autowired private ObjectMapper            objectMapper;
+    private final RawRequestRepository       rawRequestRepository;
+    private final JourneyExecutionRepository executionRepository;
+    private final JourneyStageLogRepository  stageLogRepository;
+    private final JourneyTrackingService     trackingService;
+    private final JourneyOrchestrator        journeyOrchestrator;
+    private final PasApiClient               pasApiClient;
+    private final PartnerNotifierFactory     notifierFactory;
+    private final ObjectMapper               objectMapper;
+
+    // Inbound param that carries the partner-supplied application number (business
+    // tracking key). Configurable so it can change without code edits.
+    // (@Value is copied onto the generated constructor param via lombok.config.)
+    @Value("${journey.application-number-param:obj1.stringval6}")
+    private final String applicationNumberParam;
+
+    // Self-reference to the Spring-managed proxy. A direct processJourney() call would be
+    // a self-invocation that bypasses the @Async proxy (running the journey synchronously
+    // on the HTTP thread, inside the @Transactional boundary, holding a DB connection for
+    // the whole journey). Going through the injected proxy ensures @Async takes effect.
+    // @Lazy (copied onto the constructor param via lombok.config) breaks the self-
+    // referential bean-creation cycle by injecting a lazy proxy.
+    @Lazy
+    private final NewBusinessService self;
 
     // ==========================================================================
     // SYNC — runs on HTTP thread. Must be fast. Returns immediately.
@@ -88,13 +115,16 @@ public class NewBusinessService {
                 inboundRequest.getPartnerCode(),
                 inboundRequest.getParams()
         );
+        // Stamp the inbound application number so every stage log can be searched by it.
+        context.setApplicationNumber(context.getRawParams().get(applicationNumberParam));
 
         // Create journey_execution row — status = IN_PROGRESS
         trackingService.initJourney(context, rawRequest.getId());
 
-        // Fire async — HTTP thread returns here immediately with correlationId
-        // processJourney() picks up on journeyTaskExecutor thread pool
-        processJourney(context, journeyStart);
+        // Fire async — HTTP thread returns here immediately with correlationId.
+        // Must go through the injected proxy (self) so @Async is honoured; a direct
+        // processJourney(...) call would run synchronously on this thread.
+        self.processJourney(context, journeyStart);
 
         return correlationId;
     }
@@ -138,11 +168,98 @@ public class NewBusinessService {
         }
     }
 
+    // ==========================================================================
+    // RETRY — triggered manually from the UI for a FAILED journey.
+    //
+    // Rebuilds the EXACT same context from the stored raw request, resets the
+    // execution status, and re-runs the journey async. JourneyOrchestrator skips
+    // already-succeeded APIs and JourneyStateRehydrator restores their results, so
+    // processing resumes from the stage that previously failed, with the same data.
+    // ==========================================================================
+    @Transactional
+    public String retryJourney(String correlationId) {
+        RawRequest rawRequest = rawRequestRepository.findByCorrelationId(correlationId)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "No raw request found for correlationId: " + correlationId));
+
+        log.info("[{}] Retry requested — resuming journey", correlationId);
+
+        // Rebuild the original partner request, then the same JourneyContext.
+        InboundRequest inboundRequest = fromJson(rawRequest.getRawPayload(), InboundRequest.class);
+        JourneyContext context = new JourneyContext(
+                correlationId,
+                inboundRequest.getPartnerCode(),
+                inboundRequest.getParams());
+        // Same business application number as the original run.
+        context.setApplicationNumber(context.getRawParams().get(applicationNumberParam));
+
+        // Reset status to IN_PROGRESS and clear previous failure markers.
+        trackingService.markJourneyResumed(correlationId);
+
+        long journeyStart = System.currentTimeMillis();
+        // Through the proxy so @Async actually runs it on the journey executor.
+        self.processJourney(context, journeyStart);
+
+        return correlationId;
+    }
+
+    // ==========================================================================
+    // STATUS — read model for the UI: overall status, where it failed, and the
+    // full per-attempt stage history for one application/journey.
+    // ==========================================================================
+    @Transactional(readOnly = true)
+    public JourneyStatusResponse getStatus(String correlationId) {
+        JourneyExecution execution = executionRepository.findByCorrelationId(correlationId)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "No journey found for correlationId: " + correlationId));
+
+        List<JourneyStageLog> logs =
+                stageLogRepository.findByCorrelationIdOrderByIdDesc(correlationId);
+
+        return JourneyStatusResponse.from(execution, logs);
+    }
+
+    // ==========================================================================
+    // BUSINESS-KEY ACCESS — the UI tracks journeys by application number.
+    // application_number maps 1:1 to a correlationId via journey_stage_log; these
+    // resolve the application number to its journey, then reuse the existing logic.
+    // ==========================================================================
+    @Transactional(readOnly = true)
+    public JourneyStatusResponse getStatusByApplicationNumber(String applicationNumber) {
+        return getStatus(resolveCorrelationId(applicationNumber));
+    }
+
+    @Transactional
+    public String retryByApplicationNumber(String applicationNumber) {
+        return retryJourney(resolveCorrelationId(applicationNumber));
+    }
+
+    /** Finds the correlationId backing an application number, or 400 if none exists. */
+    private String resolveCorrelationId(String applicationNumber) {
+        JourneyStageLog latest = stageLogRepository
+                .findFirstByApplicationNumberOrderByIdDesc(applicationNumber);
+        if (latest == null) {
+            throw new IllegalArgumentException(
+                    "No journey found for application number: " + applicationNumber);
+        }
+        return latest.getCorrelationId();
+    }
+
     private String toJson(Object obj) {
         try {
             return objectMapper.writeValueAsString(obj);
         } catch (Exception e) {
             return "[serialization-error]";
+        }
+    }
+
+    private <T> T fromJson(String json, Class<T> type) {
+        try {
+            return objectMapper.readValue(json, type);
+        } catch (Exception e) {
+            // A stored raw payload that won't parse is unrecoverable for retry — surface it.
+            throw new IllegalStateException(
+                    "Could not parse stored raw request payload: " + e.getMessage(), e);
         }
     }
 }

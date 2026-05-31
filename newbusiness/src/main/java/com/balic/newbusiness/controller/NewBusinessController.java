@@ -11,17 +11,13 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import com.balic.newbusiness.service.NewBusinessService;
-
-import jakarta.validation.Valid;
-import java.util.HashSet;
-import java.util.Map;
 
 /**
  * Single inbound endpoint for receiving insurance applications from external partners.
@@ -37,16 +33,14 @@ import java.util.Map;
 @Tag(name = "New Business", description = "Bajajlife new business application APIs")
 @RestController
 @RequestMapping("/api/v1")
+@RequiredArgsConstructor
 public class NewBusinessController {
 
-    @Autowired
-    private NewBusinessService newBusinessService;
-    @Autowired
-    ReceiptingService receiptingService;
+    private final NewBusinessService newBusinessService;
+    private final ReceiptingService receiptingService;
 
     //Temporary to check BI
-    @Autowired
-    private JourneyOrchestrator journeyOrchestrator;
+    private final JourneyOrchestrator journeyOrchestrator;
 
     @Operation(
         summary = "Submit NB application",
@@ -76,6 +70,84 @@ public class NewBusinessController {
 
                         correlationId,
                         "Request received. Application number will be sent via reverse feed."));
+    }
+
+    @Operation(
+        summary = "Retry / resume a failed journey",
+        description = "Re-runs a previously FAILED journey for the given correlationId. " +
+                      "Already-succeeded APIs are skipped and their results restored, so " +
+                      "processing resumes from the stage that failed, using the original data."
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "202", description = "Retry accepted and resuming",
+            content = @Content(schema = @Schema(implementation = NotificationResponse.class))),
+        @ApiResponse(responseCode = "400", description = "Unknown correlationId",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    @PostMapping("/newbusiness/{correlationId}/retry")
+    public ResponseEntity<NotificationResponse> retryJourney(@PathVariable String correlationId) {
+        newBusinessService.retryJourney(correlationId);
+        return ResponseEntity
+                .status(HttpStatus.ACCEPTED)
+                .body(new NotificationResponse(
+                        correlationId,
+                        "Retry accepted. Journey is resuming from the last failed stage."));
+    }
+
+    @Operation(
+        summary = "Get journey status",
+        description = "Returns the overall status, the stage/API where the journey stopped " +
+                      "(if any), the application number once available, and the full stage history."
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Journey status",
+            content = @Content(schema = @Schema(implementation = JourneyStatusResponse.class))),
+        @ApiResponse(responseCode = "400", description = "Unknown correlationId",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    @GetMapping("/newbusiness/{correlationId}/status")
+    public ResponseEntity<JourneyStatusResponse> getJourneyStatus(@PathVariable String correlationId) {
+        return ResponseEntity.ok(newBusinessService.getStatus(correlationId));
+    }
+
+    @Operation(
+        summary = "Get journey status by application number",
+        description = "Business-key lookup: returns the same status view searched by the " +
+                      "partner-supplied application number instead of the technical correlationId."
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Journey status",
+            content = @Content(schema = @Schema(implementation = JourneyStatusResponse.class))),
+        @ApiResponse(responseCode = "400", description = "Unknown application number",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    @GetMapping("/newbusiness/application/{applicationNumber}/status")
+    public ResponseEntity<JourneyStatusResponse> getStatusByApplicationNumber(
+            @PathVariable String applicationNumber) {
+        return ResponseEntity.ok(newBusinessService.getStatusByApplicationNumber(applicationNumber));
+    }
+
+    @Operation(
+        summary = "Retry / resume a failed journey by application number",
+        description = "Business-key retry: resumes the failed journey for the given " +
+                      "application number from the stage that failed, using the original data."
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "202", description = "Retry accepted and resuming",
+            content = @Content(schema = @Schema(implementation = NotificationResponse.class))),
+        @ApiResponse(responseCode = "400", description = "Unknown application number",
+            content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
+    })
+    @PostMapping("/newbusiness/application/{applicationNumber}/retry")
+    public ResponseEntity<NotificationResponse> retryByApplicationNumber(
+            @PathVariable String applicationNumber) {
+        String correlationId = newBusinessService.retryByApplicationNumber(applicationNumber);
+        return ResponseEntity
+                .status(HttpStatus.ACCEPTED)
+                .body(new NotificationResponse(
+                        correlationId,
+                        "Retry accepted for application " + applicationNumber
+                                + ". Journey is resuming from the last failed stage."));
     }
 
     @PostMapping(path = "/receipting", consumes = MediaType.APPLICATION_JSON_VALUE,

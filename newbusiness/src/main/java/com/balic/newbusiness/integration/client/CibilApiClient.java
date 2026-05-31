@@ -1,14 +1,14 @@
 package com.balic.newbusiness.integration.client;
 
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Recover;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.RestClient;
 
 import com.balic.newbusiness.exception.ApiCallException;
 import com.balic.newbusiness.exception.JourneyStageException;
@@ -20,9 +20,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * CibilApiClient — calls CIBIL API.
- * First stage in the journey. 
+ * First stage in the journey.
  */
 @Service
+@RequiredArgsConstructor
 public class CibilApiClient {
 
     private static final Logger log       = LoggerFactory.getLogger(CibilApiClient.class);
@@ -30,12 +31,11 @@ public class CibilApiClient {
     private static final String API_NAME  = "CIBIL_API";
 
     @Value("${api.endpoints.cibil}")
-    private String url;
+    private final String url;
 
-    @Autowired private RestTemplate          restTemplate;
-    @Autowired private JourneyTrackingService trackingService;
-    @Autowired
-    private ObjectMapper objectMapper;
+    private final RestClient            restClient;
+    private final JourneyTrackingService trackingService;
+    private final ObjectMapper          objectMapper;
 
     @Retryable(
             value  = {ApiCallException.class},
@@ -49,9 +49,12 @@ public class CibilApiClient {
         try {
             log.info("CIBIL_API request : {}",  String.valueOf(objectMapper.writeValueAsString(request)));
 
-            CibilResponse[] response = restTemplate.postForObject(
-                    url, request, CibilResponse[].class);
-            
+            CibilResponse[] response = restClient.post()
+                    .uri(url)
+                    .body(request)
+                    .retrieve()
+                    .body(CibilResponse[].class);
+
             log.info("CIBIL_API response : {}", String.valueOf(objectMapper.writeValueAsString(response)));
 
             long cibilDuration = System.currentTimeMillis() - cibilStart;
@@ -76,8 +79,10 @@ public class CibilApiClient {
         }
     }
 
+    // Return type MUST match the @Retryable method (CibilResponse[]) for Spring Retry
+    // to wire this recovery method; a mismatched type is silently ignored at runtime.
     @Recover
-    public CibilResponse recover(ApiCallException ex,
+    public CibilResponse[] recover(ApiCallException ex,
                                   CibilRequest request,
                                   JourneyContext context) {
         log.error("[{}] {} — all retries exhausted: {}",

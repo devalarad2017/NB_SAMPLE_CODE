@@ -7,9 +7,9 @@ import com.balic.newbusiness.repository.JourneyExecutionRepository;
 import com.balic.newbusiness.repository.JourneyStageLogRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -40,13 +40,14 @@ import java.util.Set;
 
  */
 @Service
+@RequiredArgsConstructor
 public class JourneyTrackingService {
 
     private static final Logger log = LoggerFactory.getLogger(JourneyTrackingService.class);
 
-    @Autowired private JourneyExecutionRepository executionRepository;
-    @Autowired private JourneyStageLogRepository  stageLogRepository;
-    @Autowired private ObjectMapper               objectMapper;
+    private final JourneyExecutionRepository executionRepository;
+    private final JourneyStageLogRepository  stageLogRepository;
+    private final ObjectMapper               objectMapper;
 
     /**
      * Creates the initial journey_execution record when a new request arrives.
@@ -92,6 +93,10 @@ public class JourneyTrackingService {
                     .ifPresent(execution -> {
                         execution.setOverallStatus("COMPLETED");
                         execution.setApplicationNumber(context.getApplicationNumber());
+                        // Clear any earlier failure markers — the journey has now succeeded.
+                        execution.setFailedStageName(null);
+                        execution.setFailedApiName(null);
+                        execution.setFailureReason(null);
                         executionRepository.save(execution);
                     });
         } catch (Exception ex) {
@@ -101,7 +106,9 @@ public class JourneyTrackingService {
     }
 
     /**
-     * Marks the journey as FAILED.
+     * Marks the journey as FAILED and records WHERE it stopped.
+     * The failing stage/API/error are read from the most recent FAILED row in
+     * journey_stage_log so the UI can show "application X failed at stage <Y> (<API>)".
      * Called from NewBusinessService catch block in processJourney().
      */
     public void markJourneyFailed(JourneyContext context, String errorMessage) {
@@ -109,11 +116,44 @@ public class JourneyTrackingService {
             executionRepository.findByCorrelationId(context.getCorrelationId())
                     .ifPresent(execution -> {
                         execution.setOverallStatus("FAILED");
+
+                        // Identify the API/stage that last failed for this correlationId.
+                        JourneyStageLog lastFailure = stageLogRepository
+                                .findTopByCorrelationIdAndStatusOrderByIdDesc(
+                                        context.getCorrelationId(), "FAILED");
+                        if (lastFailure != null) {
+                            execution.setFailedStageName(lastFailure.getStageName());
+                            execution.setFailedApiName(lastFailure.getApiName());
+                            execution.setFailureReason(lastFailure.getErrorMessage() != null
+                                    ? lastFailure.getErrorMessage() : errorMessage);
+                        } else {
+                            // No stage-level failure row (e.g. failure before any API call).
+                            execution.setFailureReason(errorMessage);
+                        }
                         executionRepository.save(execution);
                     });
         } catch (Exception ex) {
             log.error("[{}] Failed to mark journey failed: {}",
                     context.getCorrelationId(), ex.getMessage());
+        }
+    }
+
+    /**
+     * Resets a FAILED journey back to IN_PROGRESS and clears the failure markers
+     * when a manual retry is triggered from the UI.
+     */
+    public void markJourneyResumed(String correlationId) {
+        try {
+            executionRepository.findByCorrelationId(correlationId)
+                    .ifPresent(execution -> {
+                        execution.setOverallStatus("IN_PROGRESS");
+                        execution.setFailedStageName(null);
+                        execution.setFailedApiName(null);
+                        execution.setFailureReason(null);
+                        executionRepository.save(execution);
+                    });
+        } catch (Exception ex) {
+            log.error("[{}] Failed to mark journey resumed: {}", correlationId, ex.getMessage());
         }
     }
 
@@ -137,6 +177,8 @@ public class JourneyTrackingService {
         try {
             JourneyStageLog entry = new JourneyStageLog();
             entry.setCorrelationId(context.getCorrelationId());
+            // Business tracking key — lets the UI search the journey by application number.
+            entry.setApplicationNumber(context.getApplicationNumber());
             entry.setStageName(stageName);
             entry.setApiName(apiName);
             entry.setRequestPayload(toJson(request));

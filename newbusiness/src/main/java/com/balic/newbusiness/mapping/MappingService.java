@@ -2,9 +2,9 @@ package com.balic.newbusiness.mapping;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
@@ -35,13 +35,13 @@ import java.util.concurrent.ConcurrentHashMap;
 // Unmapped/blank fields are skipped with a WARN log. Handle null blank if required.
 // =============================================================================
 @Service
+@RequiredArgsConstructor
 public class MappingService {
 
     private static final Logger log = LoggerFactory.getLogger(MappingService.class);
     private static final String MAPPING_DIR = "mapping/";
 
-    @Autowired
-    private ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper;
 
     // Cache: "PARTNER_PB::UCS_API" → {stringval1=firstName, stringval2=lastName}
     private final Map<String, Map<String, String>> cache = new ConcurrentHashMap<>();
