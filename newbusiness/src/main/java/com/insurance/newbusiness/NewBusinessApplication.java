@@ -1,7 +1,10 @@
-package com.insurance.newbusiness;
+package com.balic.newbusiness;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration;
+import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
 import org.springframework.retry.annotation.EnableRetry;
 import org.springframework.scheduling.annotation.EnableAsync;
 
@@ -15,13 +18,6 @@ import org.springframework.scheduling.annotation.EnableAsync;
  *                 Without this, processJourney() runs synchronously on the
  *                 HTTP thread and the partner waits for the full journey.
  *
- * OCP Deployment:
- *   Build: mvn clean package -DskipTests
- *   Image: FROM registry.access.redhat.com/ubi8/openjdk-8:latest
- *          COPY target/newbusiness-1.0.0-SNAPSHOT.jar app.jar
- *          ENTRYPOINT ["java", "-jar", "app.jar"]
- *   Liveness probe:  GET /actuator/health/liveness
- *   Readiness probe: GET /actuator/health/readiness
  */
 @SpringBootApplication
 @EnableRetry
