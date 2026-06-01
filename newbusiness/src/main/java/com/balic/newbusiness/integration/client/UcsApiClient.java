@@ -10,24 +10,24 @@ import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
+import com.balic.newbusiness.domain.enums.ApiName;
 import com.balic.newbusiness.exception.ApiCallException;
 import com.balic.newbusiness.exception.JourneyStageException;
 import com.balic.newbusiness.integration.model.ucs.UcsApiRequest;
 import com.balic.newbusiness.integration.model.ucs.UcsResponse;
 import com.balic.newbusiness.journey.JourneyContext;
-import com.balic.newbusiness.tracking.JourneyTrackingService;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * UcsApiClient — calls UCS API.
  *
- * ── PATTERN — ALL API CLIENTS FOLLOW THIS SAME STRUCTURE ─────────────────────
+ * ── PATTERN — ALL STANDARD API CLIENTS FOLLOW THIS SAME STRUCTURE ────────────
  *   1. @Value reads URL from application.properties (OCP ConfigMap)
  *   2. @Retryable retries 3 times with exponential backoff on ApiCallException
- *   3. call() times the call, invokes RestClient, logs to journey_stage_log
+ *   3. call() delegates the timing/logging/tracking/error-wrapping to ApiCallTemplate
+ *      and supplies only the actual RestClient invocation as a lambda
  *   4. @Recover fires after all 3 retries fail — throws JourneyStageException
  *   5. JourneyOrchestrator catches JourneyStageException and stops the journey
- *   6. On next retry run, JourneyOrchestrator skips this API if already SUCCESS
+ *   6. On the next resume run, JourneyOrchestrator skips this API if already SUCCESS
  *
  * ── RETRY AOP NOTE ────────────────────────────────────────────────────────────
  * @Retryable works via Spring AOP proxy. call() must be invoked from OUTSIDE this
@@ -38,16 +38,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @RequiredArgsConstructor
 public class UcsApiClient {
 
-    private static final Logger log       = LoggerFactory.getLogger(UcsApiClient.class);
-    private static final String STAGE     = "UCS_STAGE";
-    private static final String API_NAME  = "UCS_API";
+    private static final Logger  log = LoggerFactory.getLogger(UcsApiClient.class);
+    private static final ApiName API = ApiName.UCS_API;
 
     @Value("${api.endpoints.ucs}")
     private final String url;
 
-    private final RestClient            restClient;
-    private final JourneyTrackingService trackingService;
-    private final ObjectMapper          objectMapper;
+    private final RestClient      restClient;
+    private final ApiCallTemplate apiCallTemplate;
 
     @Retryable(
             value  = {ApiCallException.class},
@@ -55,46 +53,19 @@ public class UcsApiClient {
             backoff = @Backoff(delay = 2000, multiplier = 2)
     )
     public UcsResponse call(UcsApiRequest request, JourneyContext context) {
-        long ucsStart = System.currentTimeMillis();
-        log.info("[{}] Calling {} | url={}", context.getCorrelationId(), API_NAME, url);
-
-        try {
-            log.info("UCS_API request : {}",  String.valueOf(objectMapper.writeValueAsString(request)));
-
-            UcsResponse response = restClient.post()
-                    .uri(url)
-                    .body(request)
-                    .retrieve()
-                    .body(UcsResponse.class);
-
-            log.info("UCS_API response : {}", String.valueOf(objectMapper.writeValueAsString(response)));
-
-            long ucsDuration = System.currentTimeMillis() - ucsStart;
-            trackingService.logApiCall(context, STAGE, API_NAME,
-                    request, response, "SUCCESS", null, null, ucsDuration);
-
-            log.info("[{}] {} SUCCESS | ucsScore={} | {}ms",
-                    context.getCorrelationId(), API_NAME,
-                    response != null ? response.getTranxStatus().getStatus() : "null", ucsDuration);
-
-            return response;
-
-        } catch (Exception ex) {
-            long ucsDuration = System.currentTimeMillis() - ucsStart;
-            trackingService.logApiCall(context, STAGE, API_NAME,
-                    request, null, "FAILED", "HTTP_ERROR", ex.getMessage(), ucsDuration);
-
-            log.error("[{}] {} FAILED | {}ms | {}",
-                    context.getCorrelationId(), API_NAME, ucsDuration, ex.getMessage());
-
-            throw new ApiCallException(API_NAME, ex.getMessage(), ex);
-        }
+        return apiCallTemplate.execute(API, request, context, () ->
+                restClient.post()
+                        .uri(url)
+                        .body(request)
+                        .retrieve()
+                        .body(UcsResponse.class));
     }
 
     @Recover
     public UcsResponse recover(ApiCallException ex, UcsApiRequest request, JourneyContext context) {
-        log.error("[{}] {} — all retries exhausted: {}", context.getCorrelationId(), API_NAME, ex.getMessage());
-        throw new JourneyStageException(STAGE,
-                API_NAME + " failed after all retries: " + ex.getMessage());
+        log.error("[{}] {} — all retries exhausted: {}",
+                context.getCorrelationId(), API.apiName(), ex.getMessage());
+        throw new JourneyStageException(API.stageName(),
+                API.apiName() + " failed after all retries: " + ex.getMessage());
     }
 }

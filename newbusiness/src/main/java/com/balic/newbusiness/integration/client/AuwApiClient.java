@@ -10,28 +10,25 @@ import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
+import com.balic.newbusiness.domain.enums.ApiName;
 import com.balic.newbusiness.exception.ApiCallException;
 import com.balic.newbusiness.exception.JourneyStageException;
 import com.balic.newbusiness.integration.model.auw.AuwRequest;
 import com.balic.newbusiness.integration.model.auw.AuwResponse;
 import com.balic.newbusiness.journey.JourneyContext;
-import com.balic.newbusiness.tracking.JourneyTrackingService;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Service
 @RequiredArgsConstructor
 public class AuwApiClient {
 
-    private static final Logger log       = LoggerFactory.getLogger(AuwApiClient.class);
-    private static final String STAGE     = "AUW_STAGE";
-    private static final String API_NAME  = "AUW_API";
+    private static final Logger  log = LoggerFactory.getLogger(AuwApiClient.class);
+    private static final ApiName API = ApiName.AUW_API;
 
     @Value("${api.endpoints.auw}")
     private final String url;
 
-    private final RestClient            restClient;
-    private final JourneyTrackingService trackingService;
-    private final ObjectMapper          objectMapper;
+    private final RestClient      restClient;
+    private final ApiCallTemplate apiCallTemplate;
 
     @Retryable(
             value  = {ApiCallException.class},
@@ -39,46 +36,19 @@ public class AuwApiClient {
             backoff = @Backoff(delay = 2000, multiplier = 2)
     )
     public AuwResponse call(AuwRequest request, JourneyContext context) {
-        long auwStart = System.currentTimeMillis();
-        log.info("[{}] Calling {} | url={}", context.getCorrelationId(), API_NAME, url);
-
-        try {
-            log.info("AUW_API request : {}",  String.valueOf(objectMapper.writeValueAsString(request)));
-
-            AuwResponse response = restClient.post()
-                    .uri(url)
-                    .body(request)
-                    .retrieve()
-                    .body(AuwResponse.class);
-
-            log.info("AUW_API response : {}", String.valueOf(objectMapper.writeValueAsString(response)));
-
-            long auwDuration = System.currentTimeMillis() - auwStart;
-            trackingService.logApiCall(context, STAGE, API_NAME,
-                    request, response, "SUCCESS", null, null, auwDuration);
-
-            log.info("[{}] {} SUCCESS | auwScore={} | {}ms",
-                    context.getCorrelationId(), API_NAME,
-                    response != null ? response.getStatus() : "null", auwDuration);
-
-            return response;
-
-        } catch (Exception ex) {
-            long auwDuration = System.currentTimeMillis() - auwStart;
-            trackingService.logApiCall(context, STAGE, API_NAME,
-                    request, null, "FAILED", "HTTP_ERROR", ex.getMessage(), auwDuration);
-
-            log.error("[{}] {} FAILED | {}ms | {}",
-                    context.getCorrelationId(), API_NAME, auwDuration, ex.getMessage());
-
-            throw new ApiCallException(API_NAME, ex.getMessage(), ex);
-        }
+        return apiCallTemplate.execute(API, request, context, () ->
+                restClient.post()
+                        .uri(url)
+                        .body(request)
+                        .retrieve()
+                        .body(AuwResponse.class));
     }
 
     @Recover
     public AuwResponse recover(ApiCallException ex, AuwRequest request, JourneyContext context) {
-        log.error("[{}] {} — all retries exhausted: {}", context.getCorrelationId(), API_NAME, ex.getMessage());
-        throw new JourneyStageException(STAGE,
-                API_NAME + " failed after all retries: " + ex.getMessage());
+        log.error("[{}] {} — all retries exhausted: {}",
+                context.getCorrelationId(), API.apiName(), ex.getMessage());
+        throw new JourneyStageException(API.stageName(),
+                API.apiName() + " failed after all retries: " + ex.getMessage());
     }
 }

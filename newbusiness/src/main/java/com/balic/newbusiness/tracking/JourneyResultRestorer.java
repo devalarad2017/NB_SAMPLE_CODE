@@ -27,26 +27,24 @@ import java.util.Map;
 import java.util.function.BiConsumer;
 
 /**
- * JourneyStateRehydrator — rebuilds the typed stage results on a resumed journey.
+ * JourneyResultRestorer — on a RESUMED journey, reloads the results of APIs that
+ * already succeeded, so the in-memory context matches what a fresh run would hold.
  *
  * ── WHY THIS EXISTS ──────────────────────────────────────────────────────────
- * On a retry, JourneyOrchestrator skips any API whose name is already SUCCESS in
- * journey_stage_log. Skipping avoids re-calling (no duplicate CIBIL pull / PAS push),
- * but it also means the skipped stage never re-populates its typed result on
- * JourneyContext. Downstream stages (EDC, PAS, …) read those results, so without
- * rehydration they would see null and push an incomplete payload.
+ * When a FAILED journey is resumed, JourneyOrchestrator SKIPS any API already marked
+ * SUCCESS (so we never re-call CIBIL, re-push PAS, etc.). But skipping means that
+ * API's typed result is never rebuilt in memory — and later stages (EDC, PAS, …) read
+ * those results. So this class reloads each succeeded API's last stored response from
+ * journey_stage_log and deserialises it back onto JourneyContext. A resumed run then
+ * has exactly the data a fresh run would have built in memory.
  *
- * This component reloads the last SUCCESS response_payload for each API and
- * deserialises it back into JourneyContext, so a resumed run has exactly the same
- * data a fresh run would have built in memory.
- *
- * Deserialisation failures are logged and skipped — they never abort the journey;
- * a missing rehydrated value simply behaves as it would on a fresh run.
+ * Failures are logged and skipped — they never abort the journey; a missing restored
+ * value simply behaves as it would on a fresh run.
  */
 @Component
-public class JourneyStateRehydrator {
+public class JourneyResultRestorer {
 
-    private static final Logger log = LoggerFactory.getLogger(JourneyStateRehydrator.class);
+    private static final Logger log = LoggerFactory.getLogger(JourneyResultRestorer.class);
 
     private final JourneyStageLogRepository stageLogRepository;
     private final ObjectMapper objectMapper;
@@ -58,7 +56,7 @@ public class JourneyStateRehydrator {
      */
     private final Map<String, BiConsumer<JourneyContext, String>> handlers = new HashMap<>();
 
-    public JourneyStateRehydrator(JourneyStageLogRepository stageLogRepository, ObjectMapper objectMapper) {
+    public JourneyResultRestorer(JourneyStageLogRepository stageLogRepository, ObjectMapper objectMapper) {
         this.stageLogRepository = stageLogRepository;
         this.objectMapper = objectMapper;
         handlers.put("CIBIL_API", (ctx, json) -> ctx.setCibilResult(read(json, CibilResponse[].class)));
@@ -79,18 +77,18 @@ public class JourneyStateRehydrator {
      * Repopulates JourneyContext from the latest SUCCESS log row per API.
      * No-op on a first run (no SUCCESS rows yet).
      */
-    public void rehydrate(JourneyContext context) {
+    public void restorePriorResults(JourneyContext context) {
         List<JourneyStageLog> successLogs;
         try {
             successLogs = stageLogRepository.findSuccessLogs(context.getCorrelationId());
         } catch (Exception ex) {
-            log.error("[{}] Could not load success logs for rehydration — continuing as fresh run: {}",
+            log.error("[{}] Could not load success logs to restore — continuing as fresh run: {}",
                     context.getCorrelationId(), ex.getMessage());
             return;
         }
 
         if (successLogs == null || successLogs.isEmpty()) {
-            return; // fresh run — nothing to rehydrate
+            return; // fresh run — nothing to restore
         }
 
         int restored = 0;
@@ -104,11 +102,11 @@ public class JourneyStateRehydrator {
                 handler.accept(context, logRow.getResponsePayload());
                 restored++;
             } catch (Exception ex) {
-                log.warn("[{}] Could not rehydrate {} from log — skipping: {}",
+                log.warn("[{}] Could not restore {} from log — skipping: {}",
                         context.getCorrelationId(), logRow.getApiName(), ex.getMessage());
             }
         }
-        log.info("[{}] Rehydrated {} prior API result(s) for resume", context.getCorrelationId(), restored);
+        log.info("[{}] Restored {} prior API result(s) for resume", context.getCorrelationId(), restored);
     }
 
     private <T> T read(String json, Class<T> type) {

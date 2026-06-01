@@ -75,9 +75,9 @@ CREATE INDEX idx_journey_appno       ON journey_execution(application_number);
 
 -- journey_stage_log: immutable audit log — never updated, only inserted
 -- ONE ROW per API call attempt. attempt_number increments per retry.
--- THIS IS THE SOURCE OF TRUTH for retry resume:
+-- THIS IS THE SOURCE OF TRUTH for resume:
 --   JourneyOrchestrator queries: SELECT api_name WHERE correlation_id=? AND status='SUCCESS'
---   Any api_name in that result is SKIPPED on retry.
+--   Any api_name in that result is SKIPPED on resume.
 CREATE TABLE journey_stage_log (
     id                  BIGSERIAL    PRIMARY KEY,
     correlation_id      VARCHAR(36)  NOT NULL,            -- technical/code-tracking id

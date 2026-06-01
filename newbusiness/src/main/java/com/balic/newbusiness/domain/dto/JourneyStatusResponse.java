@@ -11,7 +11,7 @@ import java.util.List;
  *
  * Tells the operator the overall status, exactly which stage/API the journey stopped
  * at (and why), the generated application number once available, and the full
- * per-attempt stage history so a retry decision can be made.
+ * per-attempt stage history so a resume decision can be made.
  */
 public record JourneyStatusResponse(
         String correlationId,

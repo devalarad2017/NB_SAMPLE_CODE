@@ -28,7 +28,7 @@ import java.util.Map;
  *   will find CIBIL there automatically — no extra code in ApiExecutor.
  *
 
- * RETRY RESUME:
+ * RESUME:
  *   JourneyOrchestrator queries journey_stage_log for api_names with status=SUCCESS.
  *   Steps in that set are skipped. Resume is at the exact failed API.
  */

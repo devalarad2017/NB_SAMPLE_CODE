@@ -56,8 +56,13 @@ import java.util.UUID;
  * ── ASYNC EXCEPTION HANDLING ─────────────────────────────────────────────────
  * Exceptions thrown inside processJourney() do NOT reach GlobalExceptionHandler.
  * They are caught in the try/catch here. Journey is marked FAILED in DB.
- * To retry: call processJourney() again with the same correlationId.
+ * To resume: call processJourney() again with the same correlationId.
  * JourneyOrchestrator will skip already-succeeded APIs automatically.
+ *
+ * NOTE — "retry" vs "resume": the per-API @Retryable in each ApiClient is the
+ * technical retry of a single call (transient blips). The journey-level
+ * resumeJourney() below is a human-triggered RESUME of a FAILED journey that
+ * continues from the stage that failed. Different concepts — kept named apart.
  */
 
 @Service
@@ -158,7 +163,7 @@ public class NewBusinessService {
                     context.getCorrelationId(), applicationNumber, journeyDuration);
 
         } catch (Exception ex) {
-            // Mark FAILED so a retry job can pick it up later
+            // Mark FAILED so it can be resumed later
             trackingService.markJourneyFailed(context, ex.getMessage());
             log.error("[{}] Journey FAILED: {}",
                     context.getCorrelationId(), ex.getMessage(), ex);
@@ -169,20 +174,20 @@ public class NewBusinessService {
     }
 
     // ==========================================================================
-    // RETRY — triggered manually from the UI for a FAILED journey.
+    // RESUME — triggered manually from the UI for a FAILED journey.
     //
     // Rebuilds the EXACT same context from the stored raw request, resets the
     // execution status, and re-runs the journey async. JourneyOrchestrator skips
-    // already-succeeded APIs and JourneyStateRehydrator restores their results, so
+    // already-succeeded APIs and JourneyResultRestorer restores their results, so
     // processing resumes from the stage that previously failed, with the same data.
     // ==========================================================================
     @Transactional
-    public String retryJourney(String correlationId) {
+    public String resumeJourney(String correlationId) {
         RawRequest rawRequest = rawRequestRepository.findByCorrelationId(correlationId)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "No raw request found for correlationId: " + correlationId));
 
-        log.info("[{}] Retry requested — resuming journey", correlationId);
+        log.info("[{}] Resume requested — resuming journey", correlationId);
 
         // Rebuild the original partner request, then the same JourneyContext.
         InboundRequest inboundRequest = fromJson(rawRequest.getRawPayload(), InboundRequest.class);
@@ -230,8 +235,8 @@ public class NewBusinessService {
     }
 
     @Transactional
-    public String retryByApplicationNumber(String applicationNumber) {
-        return retryJourney(resolveCorrelationId(applicationNumber));
+    public String resumeByApplicationNumber(String applicationNumber) {
+        return resumeJourney(resolveCorrelationId(applicationNumber));
     }
 
     /** Finds the correlationId backing an application number, or 400 if none exists. */
@@ -257,7 +262,7 @@ public class NewBusinessService {
         try {
             return objectMapper.readValue(json, type);
         } catch (Exception e) {
-            // A stored raw payload that won't parse is unrecoverable for retry — surface it.
+            // A stored raw payload that won't parse is unrecoverable for resume — surface it.
             throw new IllegalStateException(
                     "Could not parse stored raw request payload: " + e.getMessage(), e);
         }
