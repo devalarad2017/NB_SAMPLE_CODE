@@ -16,7 +16,11 @@ public class JourneyStageLog {
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     @Column(name = "correlation_id")
-    private String correlationId;  //use appno here
+    private String correlationId;  // technical/code-tracking id
+    // Business tracking key (partner-supplied application number). Stamped on every
+    // row so the whole journey can be searched/tracked by application number from the UI.
+    @Column(name = "application_number")
+    private String applicationNumber;
     @Column(name = "stage_name")
     private String stageName;
     @Column(name = "api_name")

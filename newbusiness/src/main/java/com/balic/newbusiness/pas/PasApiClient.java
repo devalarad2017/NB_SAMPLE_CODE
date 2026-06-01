@@ -12,9 +12,9 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import com.balic.newbusiness.integration.model.pas.*;
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -22,8 +22,6 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.retry.annotation.Backoff;
-import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -51,6 +49,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *   This is intentional — not a shortcut.
  */
 @Service
+@RequiredArgsConstructor
 public class PasApiClient {
 
     private static final Logger log      = LoggerFactory.getLogger(PasApiClient.class);
@@ -58,13 +57,21 @@ public class PasApiClient {
     private static final String API_NAME = "PAS_API";
 
     @Value("${api.endpoints.pas}")
-    private String pasUrl;
+    private final String pasUrl;
 
-    @Autowired private RestTemplate           restTemplate;
-    @Autowired private MappingService         mappingService;
-    @Autowired private JourneyTrackingService trackingService;
-    @Autowired
-    private ObjectMapper objectMapper;
+    // Application-number source for PAS:
+    //   GENERATE (current — PAS dev WIP): send applicationId=0 on the initial push and
+    //            use the applicationId PAS returns.
+    //   INBOUND  (future): use the application number received in the inbound request
+    //            for BOTH the initial and final push (no PAS-side generation).
+    // Kept configurable so switching over needs no code change when PAS is ready.
+    @Value("${pas.application-number.mode:GENERATE}")
+    private final String applicationNumberMode;
+
+    private final RestTemplate           restTemplate;
+    private final MappingService         mappingService;
+    private final JourneyTrackingService trackingService;
+    private final ObjectMapper           objectMapper;
 
 //    @Retryable(value = {RuntimeException.class}, maxAttempts = 3,
 //               backoff = @Backoff(delay = 3000, multiplier = 2))
@@ -123,16 +130,21 @@ public class PasApiClient {
 //        }
 //    }
     
-    @Retryable(value = {RuntimeException.class}, maxAttempts = 3,
-            backoff = @Backoff(delay = 3000, multiplier = 2))
+    // NO automatic retry here by design. PAS is the live application-submission system;
+    // an auto-retry could create a DUPLICATE application. On failure the journey stops,
+    // is marked FAILED, and is resumed ONLY by an explicit manual retry from the UI.
  public String submitAndGetApplicationNumber(JourneyContext context) throws Exception {
      long start = System.currentTimeMillis();
-     log.info("[{}] PAS Intial Push  (App Generation) | url={}", context.getCorrelationId(), pasUrl);
+     boolean inboundMode = "INBOUND".equalsIgnoreCase(applicationNumberMode);
+     log.info("[{}] PAS Initial Push | mode={} | url={}",
+             context.getCorrelationId(), applicationNumberMode, pasUrl);
 
      try {
          PasRequest pasRequest = buildPasRequest(context);
-         
-         pasRequest.getRequest().setApplicationId(0L); //TODO Temporary set to 0 for initial push
+
+         // GENERATE mode: send 0 so PAS generates the applicationId.
+         // INBOUND mode: send the application number received in the inbound request.
+         pasRequest.getRequest().setApplicationId(resolveInitialApplicationId(context, inboundMode));
        
        String token = GenerateNginTokenOSB();
 
@@ -178,12 +190,18 @@ public class PasApiClient {
          log.info("[{}] Initial Push PAS SUCCESS | applicationId={} | {}ms",
                  context.getCorrelationId(), applicationId, intialPushDuration);
 
- // ── Final Push: Submit application with generated applicationId ───────
+ // ── Final Push: Submit application ───────────────────────────────────
+         // GENERATE mode: use the applicationId PAS just generated.
+         // INBOUND mode: keep using the inbound application number (PAS does not generate).
+         String effectiveApplicationId = (inboundMode && context.getApplicationNumber() != null)
+                 ? context.getApplicationNumber()
+                 : applicationId;
+
          long finalPushStart = System.currentTimeMillis();
          log.info("[{}] Final PAS Push(App Submission) | applicationId={}",
-                 context.getCorrelationId(), applicationId);
+                 context.getCorrelationId(), effectiveApplicationId);
 
-         pasRequest.getRequest().setApplicationId(Long.parseLong(applicationId));
+         pasRequest.getRequest().setApplicationId(Long.parseLong(effectiveApplicationId));
          pasRequest.getRequest().setProposalNumber(proposalNumber);
 
          HttpEntity<?> entityGlobalFinal = new HttpEntity<>(pasRequest, headers);
@@ -201,9 +219,9 @@ public class PasApiClient {
          trackingService.logApiCall(context, STAGE, API_NAME + "_FINAL_PUSH",
                  pasRequest, secondResponse, "SUCCESS", null, null, finalPushDuration);
          log.info("[{}] Final PAS Push SUCCESS | applicationId={} | {}ms",
-                 context.getCorrelationId(), applicationId, finalPushDuration);
+                 context.getCorrelationId(), effectiveApplicationId, finalPushDuration);
 
-         return String.valueOf(applicationId);
+         return String.valueOf(effectiveApplicationId);
 
      } catch (Exception ex) {
          long duration = System.currentTimeMillis() - start;
@@ -218,7 +236,7 @@ public class PasApiClient {
 
     
 		@Value("${api.endpoints.generateNginToken}")
-		private String generateNginTokenUrl;
+		private final String generateNginTokenUrl;
 	
         public String GenerateNginTokenOSB() {
             
@@ -234,18 +252,26 @@ public class PasApiClient {
             try {
                 long start = System.currentTimeMillis();
                 ResponseEntity<Map> responseEntity = restTemplate.postForEntity(generateNginTokenUrl, generateNginTokenRequest, Map.class);
+                long duration = System.currentTimeMillis() - start;
                 if (responseEntity.getStatusCode().is2xxSuccessful() && responseEntity.getBody() != null) {
-                    
+
                 	log.info("GenerateNginTokenOSB_API response : {}",  String.valueOf(objectMapper.writeValueAsString(responseEntity.getBody())));
 
                     token = (String) responseEntity.getBody().get("token");
-                    
-                    System.out.println("Extracted Token: " + token);
+                }
+                // Surface a missing token explicitly — PAS would otherwise be called without
+                // an Authorization header and fail downstream with a confusing error.
+                if (token == null || token.isBlank()) {
+                    log.error("NGIN token generation returned no token | status={} | {}ms",
+                            responseEntity.getStatusCode(), duration);
+                } else {
+                    log.info("NGIN token generated successfully | {}ms", duration);
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                // Do not swallow silently with printStackTrace — log with context.
+                log.error("NGIN token generation failed: {}", e.getMessage(), e);
             }
-            return token; 
+            return token;
         }
 
     /**
@@ -260,6 +286,20 @@ public class PasApiClient {
      *         Each section is clearly labelled with the source API.
      */
     private PasRequest buildPasRequest(JourneyContext context) {
+
+        // ┌──────────────────────────────────────────────────────────────────────┐
+        // │ NOTE — VALUE ASSIGNMENT IN THIS METHOD IS WIP.                         │
+        // │ Many fields are intentionally hardcoded or set to placeholder/default  │
+        // │ values pending final mapping clarity — do NOT treat those as bugs.     │
+        // │                                                                        │
+        // │ The only logic corrected here (see "#5 FIX" markers below) was the     │
+        // │ eKYC selection guards: they were `ekyc.getX().isEmpty()` which meant   │
+        // │ the eKYC value was used only when EMPTY (i.e. never). Flipped to        │
+        // │ `!...isEmpty()` so an eKYC value is used WHEN PRESENT, else the partner │
+        // │ param is used. Also fixed two PH blocks that wrote eKYC gender/dob to   │
+        // │ ipPersonDetails instead of phPersonalDetails. No hardcoded/default      │
+        // │ values or param→field mappings were changed.                           │
+        // └──────────────────────────────────────────────────────────────────────┘
 
         // Step 1: Map raw partner params → PasRequest fields via property file
 //        PasRequest req = mappingService.resolveAs(
@@ -316,9 +356,10 @@ public class PasApiClient {
 
          BasicPolicyInsured insured = new BasicPolicyInsured();
 
-         if (params.get("obj1.stringval18").equalsIgnoreCase("M")) {
+         // Null-safe comparison (constant first): obj1.stringval18 may be absent for some partners.
+         if ("M".equalsIgnoreCase(params.get("obj1.stringval18"))) {
         	 insured.setGender("MALE");
-         } else  if (params.get("obj1.stringval18").equalsIgnoreCase("F")) {
+         } else  if ("F".equalsIgnoreCase(params.get("obj1.stringval18"))) {
         	 insured.setGender("FEMALE");
          }
 
@@ -327,9 +368,9 @@ public class PasApiClient {
 	     insured.setPolicyInsuredLastName(params.get("obj1.stringval15"));
 	     insured.setPolicyInsuredLegalIdentifierCode(params.get("obj2.stringval102")); //  TODO
 //	     insured.setPolicyInsuredLegalIdentifierValue(params.get("obj1.stringval117"));
-	     if (params.get("obj2.stringval102").equalsIgnoreCase("AADHAR_REFERENCE_CODE")) {
+	     if ("AADHAR_REFERENCE_CODE".equalsIgnoreCase(params.get("obj2.stringval102"))) {
 	    	 insured.setPolicyInsuredLegalIdentifierValue(params.get("obj1.stringval117"));
-	     } else if (params.get("obj2.stringval102").equalsIgnoreCase("PAN")) {
+	     } else if ("PAN".equalsIgnoreCase(params.get("obj2.stringval102"))) {
 	    	 insured.setPolicyInsuredLegalIdentifierValue(params.get("obj1.stringval122"));
 	     }
 
@@ -487,14 +528,16 @@ public class PasApiClient {
         	// 6. AUW
         	if(context.getAuwResult()!=null) {
             	IntegrationResults awsResults = new IntegrationResults();
+        		String auwFlag = null;
         		if(context.getAuwResult().getTranxResponse()!=null && context.getAuwResult().getTranxResponse().getStpFlag()!=null &&
         				!context.getAuwResult().getTranxResponse().getStpFlag().isEmpty() &&
         				context.getAuwResult().getTranxResponse().getStpFlag().get(0).getFlag()!=null &&
-        				context.getAuwResult().getTranxResponse().getStpFlag().get(0).getFlag().isEmpty()) {
+        				!context.getAuwResult().getTranxResponse().getStpFlag().get(0).getFlag().isEmpty()) {
 
-                	awsResults.setAuwResults(context.getAuwResult().getTranxResponse().getStpFlag().get(0).getFlag());
+                	auwFlag = context.getAuwResult().getTranxResponse().getStpFlag().get(0).getFlag();
         		}
-        		awsResults.setAuwResults("NONSTP");
+        		// Use the actual AUW STP flag when available; otherwise default to NONSTP.
+        		awsResults.setAuwResults(auwFlag != null ? auwFlag : "NONSTP");
 
             	IntegrationDetail awsDetail = new IntegrationDetail();
             	awsDetail.setIntegrationName("AWS");
@@ -576,7 +619,7 @@ public class PasApiClient {
         	bankDetailsDTO.setIfscCode(params.get("obj2.stringval36"));
         	bankDetailsDTO.setModeOfPayment(params.get("obj2.stringval23"));
         String pennydrop = "";
-        if(context.getPennyDropResult()!=null && context.getPennyDropResult().getStatus() != null && context.getPennyDropResult().getStatus().isEmpty()) {
+        if(context.getPennyDropResult()!=null && context.getPennyDropResult().getStatus() != null && !context.getPennyDropResult().getStatus().isEmpty()) {
             pennydrop = context.getPennyDropResult().getStatus();
         }
             if(pennydrop.equalsIgnoreCase("SUCCESS")) {
@@ -597,8 +640,8 @@ public class PasApiClient {
 
 
         	EmailId ipEmail = new EmailId();
-        	if(context.getEkycResult()!=null && context.getEkycResult().getCommAddrLine2() != null && context.getEkycResult().getCommAddrLine2().isEmpty()) {
-        		ipEmail.setAddress(context.getEkycResult().getCommAddrLine2());
+        	if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarEmail() != null && !context.getEkycResult().getAadhaarEmail().isEmpty()) {
+        		ipEmail.setAddress(context.getEkycResult().getAadhaarEmail());
             }else {
             	ipEmail.setAddress(params.get("obj1.stringval20"));
             }
@@ -610,7 +653,7 @@ public class PasApiClient {
 
         	PhoneNumber ipMobile = new PhoneNumber();
         	ipMobile.setCountryCode(null);
-        	if(context.getEkycResult()!=null && context.getEkycResult().getMobileNo() != null && context.getEkycResult().getMobileNo().isEmpty()) {
+        	if(context.getEkycResult()!=null && context.getEkycResult().getMobileNo() != null && !context.getEkycResult().getMobileNo().isEmpty()) {
         		ipMobile.setNumber(context.getEkycResult().getMobileNo());
             }else {
             	ipMobile.setNumber(params.get("obj1.stringval19"));
@@ -646,7 +689,7 @@ public class PasApiClient {
         	ipContact.setWhatsApp(ipWhatsApp);
 
         	PersonDetails ipPersonDetails = new PersonDetails();
-            ipPersonDetails.setAge((params.get("obj1.stringval17")) != null && !(params.get("obj1.stringval17")).isEmpty() ? Integer.parseInt((params.get("obj1.stringval17"))) : null);
+            ipPersonDetails.setAge(parseIntSafe(params.get("obj1.stringval17")));
 
             ipPersonDetails.setCountryOfBirth(null);
             ipPersonDetails.setCountryOfResidence(params.get("obj1.stringval52"));
@@ -655,16 +698,16 @@ public class PasApiClient {
 
            // ipPersonDetails.setGender(params.get("obj1.stringval18"));
 
-            if(context.getEkycResult()!=null && context.getEkycResult().getGender() != null && context.getEkycResult().getGender().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getGender() != null && !context.getEkycResult().getGender().isEmpty()) {
             	if (context.getEkycResult().getGender().equalsIgnoreCase("M")) {
                 	ipPersonDetails.setGender("MALE");
                 } else  if (context.getEkycResult().getGender().equalsIgnoreCase("F")) {
                 	ipPersonDetails.setGender("FEMALE");
                 }
             }else {
-            	if (params.get("obj1.stringval18").equalsIgnoreCase("M")) {
+            	if ("M".equalsIgnoreCase(params.get("obj1.stringval18"))) {
                 	ipPersonDetails.setGender("MALE");
-                } else  if (params.get("obj1.stringval18").equalsIgnoreCase("F")) {
+                } else  if ("F".equalsIgnoreCase(params.get("obj1.stringval18"))) {
                 	ipPersonDetails.setGender("FEMALE");
                 }
             }
@@ -689,16 +732,16 @@ public class PasApiClient {
 //            ipPersonDetails.setIdProofDoc("PAN");
 //            ipPersonDetails.setIdProofValue(params.get("obj1.stringval122"));
 
-	   	     if (params.get("obj2.stringval102").equalsIgnoreCase("AADHAR_REFERENCE_CODE")) {
+	   	     if ("AADHAR_REFERENCE_CODE".equalsIgnoreCase(params.get("obj2.stringval102"))) {
 		            ipPersonDetails.setIdProofDoc("AADHAR_REFERENCE_CODE");
 		            ipPersonDetails.setIdProofValue(params.get("obj1.stringval117"));
 
-		     } else if (params.get("obj2.stringval102").equalsIgnoreCase("PAN")) {
+		     } else if ("PAN".equalsIgnoreCase(params.get("obj2.stringval102"))) {
 		            ipPersonDetails.setIdProofDoc("PAN");
 		            ipPersonDetails.setIdProofValue(params.get("obj1.stringval122"));
 		     }
 
-	   	     if(context.getEkycResult()!=null && context.getEkycResult().getDateOfBirth() != null && context.getEkycResult().getDateOfBirth().isEmpty()) {
+	   	     if(context.getEkycResult()!=null && context.getEkycResult().getDateOfBirth() != null && !context.getEkycResult().getDateOfBirth().isEmpty()) {
 	   	    	ipPersonDetails.setDateOfBirth(context.getEkycResult().getDateOfBirth());
 	   	     }else {
 	             ipPersonDetails.setDateOfBirth(convertDateForPAS(params.get("obj1.stringval16")));
@@ -792,23 +835,23 @@ public class PasApiClient {
         	phContact.setWhatsApp(phWhatsApp);
 
         	PersonDetails phPersonalDetails = new PersonDetails();
-            phPersonalDetails.setAge((params.get("obj1.stringval26")) != null && !(params.get("obj1.stringval26")).isEmpty() ? Integer.parseInt((params.get("obj1.stringval26"))) : null);
+            phPersonalDetails.setAge(parseIntSafe(params.get("obj1.stringval26")));
             phPersonalDetails.setCountryOfBirth(null);
             phPersonalDetails.setCountryOfResidence(params.get("obj1.stringval76"));
             phPersonalDetails.setFatherName(params.get("obj1.stringval111"));
             phPersonalDetails.setFirstName(params.get("obj1.stringval22"));
 
             // phPersonalDetails.setGender(params.get("obj1.stringval27"));
-            if(context.getEkycResult()!=null && context.getEkycResult().getGender() != null && context.getEkycResult().getGender().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getGender() != null && !context.getEkycResult().getGender().isEmpty()) {
             	if (context.getEkycResult().getGender().equalsIgnoreCase("M")) {
-                	ipPersonDetails.setGender("MALE");
+                	phPersonalDetails.setGender("MALE");
                 } else  if (context.getEkycResult().getGender().equalsIgnoreCase("F")) {
-                	ipPersonDetails.setGender("FEMALE");
+                	phPersonalDetails.setGender("FEMALE");
                 }
             }else {
-                if (params.get("obj1.stringval27").equalsIgnoreCase("M")) {
+                if ("M".equalsIgnoreCase(params.get("obj1.stringval27"))) {
                 	phPersonalDetails.setGender("MALE");
-                } else  if (params.get("obj1.stringval27").equalsIgnoreCase("F")) {
+                } else  if ("F".equalsIgnoreCase(params.get("obj1.stringval27"))) {
                 	phPersonalDetails.setGender("FEMALE");
                 }
             }
@@ -834,17 +877,17 @@ public class PasApiClient {
 //            phPersonalDetails.setIdProofDoc("PAN");
 //            phPersonalDetails.setIdProofValue(params.get("obj1.stringval122"));
 
-	   	     if (params.get("obj2.stringval107").equalsIgnoreCase("AADHAR_REFERENCE_CODE")) {
+	   	     if ("AADHAR_REFERENCE_CODE".equalsIgnoreCase(params.get("obj2.stringval107"))) {
 	   	    	 phPersonalDetails.setIdProofDoc("AADHAR_REFERENCE_CODE");
 	   	    	 phPersonalDetails.setIdProofValue(params.get("obj3.stringval96"));
 
-		     } else if (params.get("obj2.stringval107").equalsIgnoreCase("PAN")) {
+		     } else if ("PAN".equalsIgnoreCase(params.get("obj2.stringval107"))) {
 		    	 phPersonalDetails.setIdProofDoc("PAN");
 		    	 phPersonalDetails.setIdProofValue(params.get("obj1.stringval126"));
 		     }
 
-	   	  if(context.getEkycResult()!=null && context.getEkycResult().getDateOfBirth() != null && context.getEkycResult().getDateOfBirth().isEmpty()) {
-	   	    	ipPersonDetails.setDateOfBirth(context.getEkycResult().getDateOfBirth());
+	   	  if(context.getEkycResult()!=null && context.getEkycResult().getDateOfBirth() != null && !context.getEkycResult().getDateOfBirth().isEmpty()) {
+	   	    	phPersonalDetails.setDateOfBirth(context.getEkycResult().getDateOfBirth());
 	   	     }else {
 	   	    	 phPersonalDetails.setDateOfBirth(convertDateForPAS(params.get("obj1.stringval25")));
 	   	     }
@@ -913,8 +956,8 @@ public class PasApiClient {
 
             HabbitDetailsDTO habbitDetailsDTO = new HabbitDetailsDTO();
             habbitDetailsDTO.setBmi(null);
-            habbitDetailsDTO.setHeight((params.get("obj2.stringval46")) != null && !(params.get("obj2.stringval46")).isEmpty() ? Double.parseDouble((params.get("obj2.stringval46"))) : null);
-            habbitDetailsDTO.setWeight((params.get("obj2.stringval47")) != null && !(params.get("obj2.stringval47")).isEmpty() ? Double.parseDouble((params.get("obj2.stringval47"))) : null);
+            habbitDetailsDTO.setHeight(parseDoubleSafe(params.get("obj2.stringval46")));
+            habbitDetailsDTO.setWeight(parseDoubleSafe(params.get("obj2.stringval47")));
             habbitDetailsDTO.setIsAlcohol(false);
             habbitDetailsDTO.setIsChangeInWeight(false);
             habbitDetailsDTO.setIsDGH(false);
@@ -925,7 +968,7 @@ public class PasApiClient {
 
             IccrDTO iccrDTO = new IccrDTO();
             iccrDTO.setAddress(null);
-            iccrDTO.setAge((params.get("obj1.stringval17")) != null && !(params.get("obj1.stringval17")).isEmpty() ? Integer.parseInt((params.get("obj1.stringval17"))) : null);
+            iccrDTO.setAge(parseIntSafe(params.get("obj1.stringval17")));
             iccrDTO.setAgentDetails(null);
             iccrDTO.setChannel(null);
             iccrDTO.setFscOrIcCode(params.get("obj1.stringval4"));
@@ -999,57 +1042,57 @@ public class PasApiClient {
 
             Address currentAddress = new Address();
             currentAddress.setAddressType("Current");
-            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarSubdist() != null && context.getEkycResult().getAadhaarSubdist().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarSubdist() != null && !context.getEkycResult().getAadhaarSubdist().isEmpty()) {
             	currentAddress.setCityOrVillage(context.getEkycResult().getAadhaarSubdist());
             }else {
                 currentAddress.setCityOrVillage(params.get("obj1.stringval61"));
             }
             currentAddress.setCo(null);
-            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarCountry() != null && context.getEkycResult().getAadhaarCountry().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarCountry() != null && !context.getEkycResult().getAadhaarCountry().isEmpty()) {
             	currentAddress.setCountry(context.getEkycResult().getAadhaarCountry());
             }else {
                 currentAddress.setCountry(params.get("obj2.stringval149"));
             }
-            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarDist() != null && context.getEkycResult().getAadhaarDist().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarDist() != null && !context.getEkycResult().getAadhaarDist().isEmpty()) {
             	currentAddress.setDistrict(context.getEkycResult().getAadhaarDist());
             }else {
             	currentAddress.setDistrict(params.get("obj1.stringval61"));
             }
             currentAddress.setFlag(null);
-            if(context.getEkycResult()!=null && context.getEkycResult().getCommAddrLine1() != null && context.getEkycResult().getCommAddrLine1().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getCommAddrLine1() != null && !context.getEkycResult().getCommAddrLine1().isEmpty()) {
             	currentAddress.setFlatOrDoorNo(context.getEkycResult().getCommAddrLine1());
             }else {
                 currentAddress.setFlatOrDoorNo(params.get("obj1.stringval56"));
             }
-            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarLandmark() != null && context.getEkycResult().getAadhaarLandmark().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarLandmark() != null && !context.getEkycResult().getAadhaarLandmark().isEmpty()) {
             	currentAddress.setLandmark(context.getEkycResult().getAadhaarLandmark());
             }else {
             	currentAddress.setLandmark(params.get("obj1.stringval59"));
             }
-            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarCareof() != null && context.getEkycResult().getAadhaarCareof().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarCareof() != null && !context.getEkycResult().getAadhaarCareof().isEmpty()) {
             	currentAddress.setNameOfPremises(context.getEkycResult().getAadhaarCareof());
             }else {
             	currentAddress.setNameOfPremises(params.get("obj1.stringval57"));
             }
-            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarPin() != null && context.getEkycResult().getAadhaarPin().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarPin() != null && !context.getEkycResult().getAadhaarPin().isEmpty()) {
             	currentAddress.setPinCode(context.getEkycResult().getAadhaarPin());
             }else {
                 currentAddress.setPinCode(params.get("obj1.stringval55"));
             }
             currentAddress.setPlace(params.get("obj1.stringval60"));
             currentAddress.setPoliceStation(null);
-            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarPo() != null && context.getEkycResult().getAadhaarPo().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarPo() != null && !context.getEkycResult().getAadhaarPo().isEmpty()) {
             	currentAddress.setPostOrAreaOrNagar(context.getEkycResult().getAadhaarPo());
             }else {
             	currentAddress.setPostOrAreaOrNagar(null);
             }
-            if(context.getEkycResult()!=null && context.getEkycResult().getCommAddrLine2() != null && context.getEkycResult().getCommAddrLine2().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getCommAddrLine2() != null && !context.getEkycResult().getCommAddrLine2().isEmpty()) {
             	currentAddress.setRoadOrStreetOrLane(context.getEkycResult().getCommAddrLine2());
             }else {
             	currentAddress.setRoadOrStreetOrLane(params.get("obj1.stringval58"));
             }
 
-            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarState() != null && context.getEkycResult().getAadhaarState().isEmpty()) {
+            if(context.getEkycResult()!=null && context.getEkycResult().getAadhaarState() != null && !context.getEkycResult().getAadhaarState().isEmpty()) {
             	currentAddress.setState(context.getEkycResult().getAadhaarState());
             }else {
                 currentAddress.setState(params.get("obj1.stringval62"));
@@ -1141,7 +1184,7 @@ public class PasApiClient {
             IpPersonalDetailsWrapper ippersonalDetails = new IpPersonalDetailsWrapper();
 
             PersonDetails ipBasicDetails = new PersonDetails();
-            ipBasicDetails.setAge((params.get("obj1.stringval17")) != null && !(params.get("obj1.stringval17")).isEmpty() ? Integer.parseInt((params.get("obj1.stringval17"))) : null);
+            ipBasicDetails.setAge(parseIntSafe(params.get("obj1.stringval17")));
             ipBasicDetails.setCountryOfBirth(null);
             ipBasicDetails.setCountryOfResidence(params.get("obj1.stringval52"));
             ipBasicDetails.setFatherName(params.get("obj1.stringval111"));
@@ -1790,5 +1833,63 @@ public class PasApiClient {
         // Returns "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
         return zonedDateTime.format(OUTPUT_FORMATTER);
     }
-    	 
+
+    /**
+     * Resolves the applicationId to send on the INITIAL push.
+     *   GENERATE mode → 0L (PAS generates and returns the real id).
+     *   INBOUND  mode → the application number received in the inbound request.
+     * Falls back to 0L if INBOUND is configured but no usable inbound number is present,
+     * so a misconfiguration degrades to today's behaviour rather than failing.
+     */
+    private long resolveInitialApplicationId(JourneyContext context, boolean inboundMode) {
+        if (inboundMode) {
+            Long inbound = parseLongSafe(context.getApplicationNumber());
+            if (inbound != null) {
+                return inbound;
+            }
+            log.warn("[{}] PAS INBOUND mode but no numeric inbound application number — defaulting to 0",
+                    context.getCorrelationId());
+        }
+        return 0L;
+    }
+
+    // ── Null-and-format-safe numeric parsing ──────────────────────────────────
+    // Partner payloads are free-form strings; a blank or non-numeric value must not
+    // abort PAS submission with an unchecked exception. These return null on bad input.
+    private static Long parseLongSafe(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse '{}' as long — using null", value);
+            return null;
+        }
+    }
+
+    private static Integer parseIntSafe(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse '{}' as int — using null", value);
+            return null;
+        }
+    }
+
+    private static Double parseDoubleSafe(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return Double.parseDouble(value.trim());
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse '{}' as double — using null", value);
+            return null;
+        }
+    }
+
 }

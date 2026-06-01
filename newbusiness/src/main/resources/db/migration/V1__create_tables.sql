@@ -1,5 +1,9 @@
 -- V1__create_tables.sql
 -- Run against PostgreSQL before starting the application.
+--
+-- SCHEMA SOURCE OF TRUTH: Flyway is intentionally NOT used. This file is the
+-- authoritative, hand-maintained record of the DB schema and is executed manually
+-- on each environment. Keep it in sync with the JPA entities on every schema change.
 
 -- partner_config: one row per external partner
 CREATE TABLE partner_config (
@@ -51,12 +55,23 @@ CREATE TABLE journey_execution (
     partner_code        VARCHAR(20),
     raw_request_id      BIGINT       REFERENCES raw_request(id),
     overall_status      VARCHAR(20)  DEFAULT 'IN_PROGRESS',  -- IN_PROGRESS|COMPLETED|FAILED
+    failed_stage_name   VARCHAR(50),                          -- stage where the journey last stopped
+    failed_api_name     VARCHAR(50),                          -- API that failed at that stage
+    failure_reason      TEXT,                                 -- error detail for UI display
     application_number  VARCHAR(100),
     created_at          TIMESTAMP    DEFAULT NOW(),
     updated_at          TIMESTAMP    DEFAULT NOW()
 );
+-- If journey_execution already exists (e.g. dev), apply these instead of recreating:
+--   ALTER TABLE journey_execution ADD COLUMN failed_stage_name VARCHAR(50);
+--   ALTER TABLE journey_execution ADD COLUMN failed_api_name   VARCHAR(50);
+--   ALTER TABLE journey_execution ADD COLUMN failure_reason    TEXT;
+--   CREATE INDEX idx_journey_appno ON journey_execution(application_number);
 CREATE INDEX idx_journey_correlation ON journey_execution(correlation_id);
 CREATE INDEX idx_journey_status      ON journey_execution(overall_status);
+-- application_number is the BUSINESS tracking key the UI searches by (correlation_id
+-- is only a technical/code-tracking id). Indexed for fast lookup at scale.
+CREATE INDEX idx_journey_appno       ON journey_execution(application_number);
 
 -- journey_stage_log: immutable audit log — never updated, only inserted
 -- ONE ROW per API call attempt. attempt_number increments per retry.
@@ -65,7 +80,8 @@ CREATE INDEX idx_journey_status      ON journey_execution(overall_status);
 --   Any api_name in that result is SKIPPED on retry.
 CREATE TABLE journey_stage_log (
     id                  BIGSERIAL    PRIMARY KEY,
-    correlation_id      VARCHAR(36)  NOT NULL,
+    correlation_id      VARCHAR(36)  NOT NULL,            -- technical/code-tracking id
+    application_number  VARCHAR(100),                     -- business tracking key (UI search)
     stage_name          VARCHAR(50),
     api_name            VARCHAR(50),
     attempt_number      INTEGER      DEFAULT 1,
@@ -79,6 +95,11 @@ CREATE TABLE journey_stage_log (
 );
 CREATE INDEX idx_stage_log_correlation ON journey_stage_log(correlation_id);
 CREATE INDEX idx_stage_log_api_status  ON journey_stage_log(correlation_id, api_name, status);
+-- Search the whole journey log by the business application number.
+CREATE INDEX idx_stage_log_appno       ON journey_stage_log(application_number);
+-- If journey_stage_log already exists (e.g. dev), apply these instead of recreating:
+--   ALTER TABLE journey_stage_log ADD COLUMN application_number VARCHAR(100);
+--   CREATE INDEX idx_stage_log_appno ON journey_stage_log(application_number);
 
 -- Sample data: PARTNER_A config + example mapping rows
 INSERT INTO partner_config(partner_code, reverse_feed_url, auth_type, auth_credential, is_active)

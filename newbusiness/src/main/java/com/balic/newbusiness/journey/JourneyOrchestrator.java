@@ -2,9 +2,9 @@ package com.balic.newbusiness.journey;
 
 import com.balic.newbusiness.integration.model.pennydrop.PennyDropRequest;
 import com.balic.newbusiness.integration.model.proposal.ProposalRequest;
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -28,6 +28,7 @@ import com.balic.newbusiness.integration.model.pan.PanResponse.PanCardDto;
 import com.balic.newbusiness.integration.model.ucs.UcsApiRequest;
 import com.balic.newbusiness.integration.model.ucs.UcsApiRequest.ProposalDetail;
 import com.balic.newbusiness.mapping.MappingService;
+import com.balic.newbusiness.tracking.JourneyStateRehydrator;
 import com.balic.newbusiness.tracking.JourneyTrackingService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -76,33 +77,34 @@ import java.util.stream.Collectors;
  * 4. Remove from JourneyContext if its result isn't used by other stages
  */
 @Service
+@RequiredArgsConstructor
 public class JourneyOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(JourneyOrchestrator.class);
 
-    @Autowired private MappingService            mappingService;
-    @Autowired private JourneyTrackingService   trackingService;
-    @Autowired
-    private ObjectMapper objectMapper;
-    @Autowired private BiProductImpl biProductImpl;
+    private final MappingService          mappingService;
+    private final JourneyTrackingService  trackingService;
+    private final JourneyStateRehydrator  stateRehydrator;
+    private final ObjectMapper            objectMapper;
+    private final BiProductImpl           biProductImpl;
 
     // ── API Clients — one per API or group ────────────────────────────────────
-    @Autowired private CibilApiClient        cibilClient;       // CIBIL credit check — first stage
-    @Autowired private UcsApiClient			 ucsClient;
-    @Autowired private PanApiClient          panClient;
-    @Autowired private BiApiClient			 biClient;
-    @Autowired private EkycApiClient		 ekycClient;
-    @Autowired private EdcApiClient			 edcClient;
-    @Autowired private DcsApiClient          dcsClient;
-    @Autowired private AuwApiClient          auwClient;
-    @Autowired private MrsApiClient          mrsClient;
-    @Autowired private FesApiClient          fesClient;
-    @Autowired private PennyDropApiClient    pennyDropClient;
-    @Autowired private ProposalApiClient     proposalClient;
+    private final CibilApiClient        cibilClient;       // CIBIL credit check — first stage
+    private final UcsApiClient			ucsClient;
+    private final PanApiClient          panClient;
+    private final BiApiClient			biClient;
+    private final EkycApiClient		    ekycClient;
+    private final EdcApiClient			edcClient;
+    private final DcsApiClient          dcsClient;
+    private final AuwApiClient          auwClient;
+    private final MrsApiClient          mrsClient;
+    private final FesApiClient          fesClient;
+    private final PennyDropApiClient    pennyDropClient;
+    private final ProposalApiClient     proposalClient;
 
-    @Autowired
+    // @Qualifier is copied onto the generated constructor param via lombok.config.
     @Qualifier("journeyTaskExecutor")
-    private Executor taskExecutor;
+    private final Executor taskExecutor;
 
     // ==========================================================================
     // execute() — called by NewBusinessService.processJourney()
@@ -121,6 +123,11 @@ public class JourneyOrchestrator {
         Set<String> succeeded = trackingService.getSucceededApiNames(context.getCorrelationId());
         log.info("[{}] Journey execute | alreadySucceeded={}",
                 context.getCorrelationId(), succeeded);
+
+        // Resume support: rebuild typed results for already-succeeded APIs so that
+        // skipped stages still provide their data to downstream stages (EDC, PAS, …).
+        // No-op on a first run when nothing has succeeded yet.
+        stateRehydrator.rehydrate(context);
         
         Map<String, String> params = context.getRawParams();
         String ekycFlag =  params.get("obj3.stringval107");
@@ -203,10 +210,17 @@ public class JourneyOrchestrator {
         // Call CIBIL API
         context.setCibilResult(cibilClient.call(req, context));
 
-        log.info("[{}] CIBIL complete | score={} status={}",
-                context.getCorrelationId(),
-                context.getCibilResult()[0].getCibilId(),
-                context.getCibilResult()[0].getCibilStatus());
+        // Guard the result access: a null/empty response array would otherwise throw
+        // NPE / ArrayIndexOutOfBounds and abort the journey on the logging line itself.
+        var cibilResult = context.getCibilResult();
+        if (cibilResult != null && cibilResult.length > 0 && cibilResult[0] != null) {
+            log.info("[{}] CIBIL complete | score={} status={}",
+                    context.getCorrelationId(),
+                    cibilResult[0].getCibilId(),
+                    cibilResult[0].getCibilStatus());
+        } else {
+            log.warn("[{}] CIBIL complete but response was empty/null", context.getCorrelationId());
+        }
     }
     
     // ==========================================================================
@@ -274,25 +288,16 @@ public class JourneyOrchestrator {
         proposalDetails.setCustomerId(params.get("obj2.stringval82"));
         proposalDetails.setBenefitCode("L155A01"); //TODO find details.
         
-        String premiumStr = params.get("obj1.stringval37");
-        String frequencyStr = params.get("obj1.stringval39");
-        double annualPremium = 0.0;
-        if (premiumStr != null && !premiumStr.isEmpty() && frequencyStr != null && !premiumStr.isEmpty()) {
-            double premium = Double.parseDouble(premiumStr);
-            double frequency = Double.parseDouble(frequencyStr);
-            annualPremium = premium * frequency;
-        }
-        
+        // Premium × frequency — parsed safely so bad partner data can't abort the journey.
+        double annualPremium = parseDoubleSafe(params.get("obj1.stringval37"), 0.0)
+                * parseDoubleSafe(params.get("obj1.stringval39"), 0.0);
+
         proposalDetails.setAnnualPremium(String.valueOf(annualPremium));
         proposalDetails.setPpt(params.get("obj1.stringval36"));
         proposalDetails.setTotalInstallmentPremium(String.valueOf(annualPremium));
         
-        String saValue1 = params.get("obj1.stringval40");
-        String saValue2 = params.get("list1.stringval2");
-        double totalBenefitSa = 0.0;
-        double val1 = (saValue1 != null && !saValue1.isEmpty()) ? Double.parseDouble(saValue1) : 0.0;
-        double val2 = (saValue2 != null && !saValue2.isEmpty()) ? Double.parseDouble(saValue2) : 0.0;
-        totalBenefitSa = val1 + val2;
+        double totalBenefitSa = parseDoubleSafe(params.get("obj1.stringval40"), 0.0)
+                + parseDoubleSafe(params.get("list1.stringval2"), 0.0);
         proposalDetails.setBenefitSa(String.valueOf(totalBenefitSa));
         proposalDetails.setFundValue("0");		//TODO
         proposalDetails.setSinglePremium(params.get("obj1.stringval37"));
@@ -552,8 +557,8 @@ public class JourneyOrchestrator {
         details.setPinCode(params.get("obj1.stringval55"));
         details.setStateCode(params.get("obj1.stringval62"));
         details.setGstStateCode(params.get("obj1.stringval62"));
-        details.setAmount((params.get("obj1.stringval37")) != null && !(params.get("obj1.stringval37")).trim().isEmpty() ? Long.parseLong((params.get("obj1.stringval37")).trim()) : null);
-        
+        details.setAmount(parseLongSafe(params.get("obj1.stringval37")));
+
         req.getCibilRequestDto().setBasicDetailsDto(Collections.singletonList(details));
 
         EdcRequest.DrcRequest drcReq = new EdcRequest.DrcRequest();
@@ -684,15 +689,10 @@ public class JourneyOrchestrator {
         edcData.setDistributionChannel("-999");
         edcData.setSubChannel1(params.get("obj5.stringval126"));
         
-        String premiumStr = params.get("obj1.stringval37");
-        String frequencyStr = params.get("obj1.stringval39");
-        double annualPremium = 0.0;
-        if (premiumStr != null && !premiumStr.isEmpty() && frequencyStr != null && !premiumStr.isEmpty()) {
-            double premium = Double.parseDouble(premiumStr);
-            double frequency = Double.parseDouble(frequencyStr);
-            annualPremium = premium * frequency;
-        }
-        
+        // Premium × frequency — parsed safely so bad partner data can't abort the journey.
+        double annualPremium = parseDoubleSafe(params.get("obj1.stringval37"), 0.0)
+                * parseDoubleSafe(params.get("obj1.stringval39"), 0.0);
+
         edcData.setAnnualPremium((String.valueOf(annualPremium)));
         edcData.setBookingFrequency("Quarterly");          //TODO LOV p_in_obj_1.stringval39
         edcData.setPolicyTerm(params.get("obj5.stringval35"));
@@ -1100,15 +1100,10 @@ public class JourneyOrchestrator {
         data.setIsForm60(params.get("obj1.stringval123"));
         data.setResidenceCountry(params.get("obj1.stringval76"));
         
-        String premiumStr = params.get("obj1.stringval37");
-        String frequencyStr = params.get("obj1.stringval39");
-        double annualPremium = 0.0;
-        if (premiumStr != null && !premiumStr.isEmpty() && frequencyStr != null && !premiumStr.isEmpty()) {
-            double premium = Double.parseDouble(premiumStr);
-            double frequency = Double.parseDouble(frequencyStr);
-            annualPremium = premium * frequency;
-        }
-        
+        // Premium × frequency — parsed safely so bad partner data can't abort the journey.
+        double annualPremium = parseDoubleSafe(params.get("obj1.stringval37"), 0.0)
+                * parseDoubleSafe(params.get("obj1.stringval39"), 0.0);
+
         data.setAnnualPremium(Integer.valueOf((int) annualPremium));
         //data.setAgeOfDeath(params.get("list5(0).stringval4"));  //TODO - params.get("list5.WeoRecStrings150User(0).stringval4")
         data.setAgeOfDeath("0"); //TODO check with PB team
@@ -2123,5 +2118,32 @@ public class JourneyOrchestrator {
         return nameBuilder.toString();
     }
 
+    // ── Null-and-format-safe numeric parsing ──────────────────────────────────
+    // Partner payloads are free-form strings; a non-numeric or blank value must not
+    // abort the whole journey with an unchecked NumberFormatException. These helpers
+    // return a safe default and log the offending value instead.
+    private static Double parseDoubleSafe(String value, double defaultValue) {
+        if (value == null || value.trim().isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Double.parseDouble(value.trim());
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse '{}' as double — using default {}", value, defaultValue);
+            return defaultValue;
+        }
+    }
+
+    private static Long parseLongSafe(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse '{}' as long — using null", value);
+            return null;
+        }
+    }
 
 }

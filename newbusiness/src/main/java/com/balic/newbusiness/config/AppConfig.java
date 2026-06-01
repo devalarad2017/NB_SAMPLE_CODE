@@ -11,6 +11,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.concurrent.Executor;
@@ -68,6 +69,18 @@ public class AppConfig {
         factory.setConnectTimeout(connectTimeoutMs);
         factory.setReadTimeout(readTimeoutMs);
         return new RestTemplate(factory);
+    }
+
+    // ── RestClient (Spring 6.1+, the modern fluent HTTP client) ───────────────
+    // Provided alongside RestTemplate using the SAME connect/read timeouts so the
+    // integration clients can be migrated to it gradually, one at a time, without
+    // changing existing RestTemplate-based behaviour. Nothing is forced to switch.
+    @Bean
+    public RestClient restClient() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(connectTimeoutMs);
+        factory.setReadTimeout(readTimeoutMs);
+        return RestClient.builder().requestFactory(factory).build();
     }
 
     @Bean

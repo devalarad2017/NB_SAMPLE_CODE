@@ -33,6 +33,18 @@ public class JourneyExecution {
     @Column(name = "overall_status", length = 20)
     private String overallStatus;
 
+    // ── Failure tracking — populated when the journey stops at a stage ────────
+    // These let the UI show "application X failed at stage <Y> (<API>) because <reason>"
+    // and are cleared again on a successful resume / completion.
+    @Column(name = "failed_stage_name", length = 50)
+    private String failedStageName;
+
+    @Column(name = "failed_api_name", length = 50)
+    private String failedApiName;
+
+    @Column(name = "failure_reason", columnDefinition = "TEXT")
+    private String failureReason;
+
     // Set after PAS returns success — passed to reverse feed
     @Column(name = "application_number", length = 100)
     private String applicationNumber;

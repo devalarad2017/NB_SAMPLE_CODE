@@ -1,8 +1,8 @@
 package com.balic.newbusiness.reversefeed;
 
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -30,14 +30,15 @@ import java.util.Map;
  * To add a new partner: copy this class, change PARTNER_CODE, adjust payload if needed.
  */
 @Component
+@RequiredArgsConstructor
 public class DefaultPartnerNotifier implements PartnerNotifier {
 
     private static final Logger log = LoggerFactory.getLogger(DefaultPartnerNotifier.class);
     private static final String PARTNER_CODE = "TURTLEMINT";
 
-    @Autowired private RestTemplate restTemplate;
-    @Autowired private PartnerConfigRepository partnerConfigRepository;
-    @Autowired private JourneyTrackingService trackingService;
+    private final RestTemplate restTemplate;
+    private final PartnerConfigRepository partnerConfigRepository;
+    private final JourneyTrackingService trackingService;
 
     @Override
     public String getSupportedPartnerCode() {
