@@ -132,7 +132,7 @@ public class PasApiClient {
     
     // NO automatic retry here by design. PAS is the live application-submission system;
     // an auto-retry could create a DUPLICATE application. On failure the journey stops,
-    // is marked FAILED, and is resumed ONLY by an explicit manual retry from the UI.
+    // is marked FAILED, and is resumed ONLY by an explicit manual resume from the UI.
  public String submitAndGetApplicationNumber(JourneyContext context) throws Exception {
      long start = System.currentTimeMillis();
      boolean inboundMode = "INBOUND".equalsIgnoreCase(applicationNumberMode);

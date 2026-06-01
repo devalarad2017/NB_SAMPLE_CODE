@@ -73,25 +73,25 @@ public class NewBusinessController {
     }
 
     @Operation(
-        summary = "Retry / resume a failed journey",
+        summary = "Resume a failed journey",
         description = "Re-runs a previously FAILED journey for the given correlationId. " +
                       "Already-succeeded APIs are skipped and their results restored, so " +
                       "processing resumes from the stage that failed, using the original data."
     )
     @ApiResponses({
-        @ApiResponse(responseCode = "202", description = "Retry accepted and resuming",
+        @ApiResponse(responseCode = "202", description = "Resume accepted and resuming",
             content = @Content(schema = @Schema(implementation = NotificationResponse.class))),
         @ApiResponse(responseCode = "400", description = "Unknown correlationId",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
-    @PostMapping("/newbusiness/{correlationId}/retry")
-    public ResponseEntity<NotificationResponse> retryJourney(@PathVariable String correlationId) {
-        newBusinessService.retryJourney(correlationId);
+    @PostMapping("/newbusiness/{correlationId}/resume")
+    public ResponseEntity<NotificationResponse> resumeJourney(@PathVariable String correlationId) {
+        newBusinessService.resumeJourney(correlationId);
         return ResponseEntity
                 .status(HttpStatus.ACCEPTED)
                 .body(new NotificationResponse(
                         correlationId,
-                        "Retry accepted. Journey is resuming from the last failed stage."));
+                        "Resume accepted. Journey is resuming from the last failed stage."));
     }
 
     @Operation(
@@ -128,25 +128,25 @@ public class NewBusinessController {
     }
 
     @Operation(
-        summary = "Retry / resume a failed journey by application number",
-        description = "Business-key retry: resumes the failed journey for the given " +
+        summary = "Resume a failed journey by application number",
+        description = "Business-key resume: resumes the failed journey for the given " +
                       "application number from the stage that failed, using the original data."
     )
     @ApiResponses({
-        @ApiResponse(responseCode = "202", description = "Retry accepted and resuming",
+        @ApiResponse(responseCode = "202", description = "Resume accepted and resuming",
             content = @Content(schema = @Schema(implementation = NotificationResponse.class))),
         @ApiResponse(responseCode = "400", description = "Unknown application number",
             content = @Content(schema = @Schema(implementation = ErrorResponse.class)))
     })
-    @PostMapping("/newbusiness/application/{applicationNumber}/retry")
-    public ResponseEntity<NotificationResponse> retryByApplicationNumber(
+    @PostMapping("/newbusiness/application/{applicationNumber}/resume")
+    public ResponseEntity<NotificationResponse> resumeByApplicationNumber(
             @PathVariable String applicationNumber) {
-        String correlationId = newBusinessService.retryByApplicationNumber(applicationNumber);
+        String correlationId = newBusinessService.resumeByApplicationNumber(applicationNumber);
         return ResponseEntity
                 .status(HttpStatus.ACCEPTED)
                 .body(new NotificationResponse(
                         correlationId,
-                        "Retry accepted for application " + applicationNumber
+                        "Resume accepted for application " + applicationNumber
                                 + ". Journey is resuming from the last failed stage."));
     }
 

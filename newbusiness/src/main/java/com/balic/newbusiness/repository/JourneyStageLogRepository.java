@@ -13,7 +13,7 @@ public interface JourneyStageLogRepository extends JpaRepository<JourneyStageLog
 
     /**
      * Returns the set of api_names that have already succeeded for this correlationId.
-     * Used by JourneyOrchestrator to skip already-completed API steps on retry.
+     * Used by JourneyOrchestrator to skip already-completed API steps on resume.
      */
     @Query("SELECT l.apiName FROM JourneyStageLog l " +
            "WHERE l.correlationId = :correlationId AND l.status = 'SUCCESS'")
@@ -21,7 +21,7 @@ public interface JourneyStageLogRepository extends JpaRepository<JourneyStageLog
 
     /**
      * Returns all SUCCESS rows for a correlationId in insertion order.
-     * JourneyStateRehydrator iterates these and keeps the latest per api_name to
+     * JourneyResultRestorer iterates these and keeps the latest per api_name to
      * rebuild JourneyContext on resume.
      */
     @Query("SELECT l FROM JourneyStageLog l " +
@@ -48,7 +48,7 @@ public interface JourneyStageLogRepository extends JpaRepository<JourneyStageLog
 
     /**
      * Most recent log row for an application number — used to resolve the
-     * correlationId backing that application number for status/retry.
+     * correlationId backing that application number for status/resume.
      */
     JourneyStageLog findFirstByApplicationNumberOrderByIdDesc(String applicationNumber);
 }

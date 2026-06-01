@@ -28,7 +28,7 @@ import com.balic.newbusiness.integration.model.pan.PanResponse.PanCardDto;
 import com.balic.newbusiness.integration.model.ucs.UcsApiRequest;
 import com.balic.newbusiness.integration.model.ucs.UcsApiRequest.ProposalDetail;
 import com.balic.newbusiness.mapping.MappingService;
-import com.balic.newbusiness.tracking.JourneyStateRehydrator;
+import com.balic.newbusiness.tracking.JourneyResultRestorer;
 import com.balic.newbusiness.tracking.JourneyTrackingService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -55,9 +55,9 @@ import java.util.stream.Collectors;
  *   Step 2 — enrich():    sets fields from prior stage responses (typed, compile-safe)
  *   Step 3 — call():      invokes the downstream API with retry built-in
  *   Step 4 — store():     sets typed result on JourneyContext for later stages
- *   Step 5 — skip check:  on retry, already-succeeded stages are skipped entirely
+ *   Step 5 — skip check:  on resume, already-succeeded stages are skipped entirely
  *
- * ── HOW RETRY RESUME WORKS ────────────────────────────────────────────────────
+ * ── HOW RESUME WORKS ────────────────────────────────────────────────────
  * JourneyTrackingService.getSucceededApiNames() queries journey_stage_log for
  * api_names with status=SUCCESS. Any stage whose API name is in that set is skipped.
  *
@@ -84,7 +84,7 @@ public class JourneyOrchestrator {
 
     private final MappingService          mappingService;
     private final JourneyTrackingService  trackingService;
-    private final JourneyStateRehydrator  stateRehydrator;
+    private final JourneyResultRestorer   resultRestorer;
     private final ObjectMapper            objectMapper;
     private final BiProductImpl           biProductImpl;
 
@@ -109,7 +109,7 @@ public class JourneyOrchestrator {
     // ==========================================================================
     // execute() — called by NewBusinessService.processJourney()
     //
-    // Runs all stages in order. On retry, already-succeeded stages are skipped.
+    // Runs all stages in order. On resume, already-succeeded stages are skipped.
     // PAS and reverse feed are NOT here — they run in NewBusinessService after
     // this method returns because PAS gives applicationNumber that must be stored.
     // ==========================================================================
@@ -127,7 +127,7 @@ public class JourneyOrchestrator {
         // Resume support: rebuild typed results for already-succeeded APIs so that
         // skipped stages still provide their data to downstream stages (EDC, PAS, …).
         // No-op on a first run when nothing has succeeded yet.
-        stateRehydrator.rehydrate(context);
+        resultRestorer.restorePriorResults(context);
         
         Map<String, String> params = context.getRawParams();
         String ekycFlag =  params.get("obj3.stringval107");

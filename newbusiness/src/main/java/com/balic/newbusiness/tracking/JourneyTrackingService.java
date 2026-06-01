@@ -25,8 +25,8 @@ import java.util.Set;
  * If a DB write fails here, it logs the error to file and returns silently.
  * The journey continues regardless.
  *
- * ── RETRY RESUME ─────────────────────────────────────────────────────────────
- * getSucceededApiNames() is the foundation of the retry resume feature.
+ * ── RESUME ─────────────────────────────────────────────────────────────
+ * getSucceededApiNames() is the foundation of the resume feature.
  * JourneyOrchestrator calls this at the start of every execute() call.
  * Any apiName in the returned set will be skipped in that run.
  *
@@ -69,7 +69,7 @@ public class JourneyTrackingService {
 
     /**
      * Returns set of api_names that already have status=SUCCESS in journey_stage_log.
-     * JourneyOrchestrator uses this to skip already-completed stages on retry.
+     * JourneyOrchestrator uses this to skip already-completed stages on resume.
      * Returns empty set on first run or if DB query fails.
      */
     public Set<String> getSucceededApiNames(String correlationId) {
@@ -140,7 +140,7 @@ public class JourneyTrackingService {
 
     /**
      * Resets a FAILED journey back to IN_PROGRESS and clears the failure markers
-     * when a manual retry is triggered from the UI.
+     * when a manual resume is triggered from the UI.
      */
     public void markJourneyResumed(String correlationId) {
         try {
