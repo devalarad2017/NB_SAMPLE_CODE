@@ -1,9 +1,7 @@
-# API Mappings Master Document
-## New Business Journey — All API Field Mappings
-
-**Purpose:** God document for BA and Developer to track, review, and correct field mappings across all 12 APIs in the New Business journey.
-**Last Updated:** 2026-06-02
-**Source files:** `JourneyOrchestrator.java`, `PasApiClient.java`, `InboundRequest.java`, integration model POJOs
+# API Mappings Master Document — New Business Journey
+**God Document for BA & Developer: field-level mapping, inter-API data flow, LOV/defaults, pending items**
+**Source files:** `InboundRequest.java` · `JourneyOrchestrator.java` · `PasApiClient.java` · all `*Request/*.Response` POJOs
+**Updated:** 2026-06-02
 
 ---
 
@@ -11,666 +9,607 @@
 
 | Symbol | Meaning |
 |--------|---------|
-| `stringvalN` | Generic key from partner's inbound request (InboundRequest.params map) |
-| **ENRICHED** | Field is NOT from partner input — set programmatically from a prior API's response |
-| **HARDCODED** | Value is fixed in code, not configurable via DB mapping |
-| **DEFAULT** | Partner may omit the field; DB mapping supplies a fallback value |
-| **LOV** | List of Values — only these values are accepted |
-| **TODO** | Mapping not yet implemented or confirmed; needs BA/Dev action |
-| Fix N | References a known production fix documented in `PasApiClient.java` |
+| `stringvalN` | Key in `InboundRequest.params` map sent by partner |
+| **ENRICHED** | Field is NOT from partner input — set from a prior API's response output |
+| **HARDCODED** | Fixed value in code, not configurable |
+| **TODO** | Mapping not yet implemented; needs BA/Dev action |
+| LOV | List of Values — only these values accepted |
+| Default | Value applied in code when partner sends blank/null |
+| Fix N | Known production fix documented in `PasApiClient.java` |
 
 ---
 
-## Journey Stage Execution Order
+## 1. Journey Execution Order & High-Level Flow
 
 ```
-1. ELIGIBILITY_API        (Stage 1 — sequential)
-2. EDC_API                (Stage 2 — parallel)
-   PASA_API               (Stage 2 — parallel, same ScoringRequest)
-   TASA_API               (Stage 2 — parallel, same ScoringRequest)
-3. MEDICAL_API            (Stage 3 — sequential)
-4. KYC_API                (Stage 4 — sequential)
-5. PREMIUM_CALC_API       (Stage 5 — sequential)
-6. UNDERWRITING_API       (Stage 6 — sequential)
-7. DOCUMENT_API           (Stage 7 — sequential)
-8. PROPOSAL_SUBMIT_API    (Stage 8 — sequential)
-9. PAS_API                (Post-Journey — handled in PasApiClient)
-10. REVERSE_FEED_API      (Post-PAS — handled in DefaultPartnerNotifier)
+InboundRequest
+  └─ partnerCode
+  └─ params { stringval1..N }
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 1 ─ ELIGIBILITY_API                                      │
+│    Input  : stringval1,2,3,4,5,6,7,10,11,45,50,51,52           │
+│    Output : eligibilityId, ageAtEntry  ──────────────────────┐  │
+└─────────────────────────────────────────────────────────────────┘
+        │                                                         │
+        ▼                                                         │
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 2 ─ SCORING (EDC + PASA + TASA run in PARALLEL)          │
+│    Input  : stringval1,2,4,45,51,52,60,61,62                   │
+│    EDC  Output  : creditScore  ─────────────────────────────┐  │
+│    PASA Output  : pasaScore    ─────────────────────────────┤  │
+│    TASA Output  : riskCategory ─────────────────────────────┤  │
+└─────────────────────────────────────────────────────────────────┘
+        │                                                    │    │
+        ▼                                                    │    │
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 3 ─ MEDICAL_API                                          │
+│    Input  : stringval1,2,4,45,51,52,70,71,72,73,74             │
+│           + ENRICHED: eligibilityId, ageAtEntry ◄───────────┘  │
+│           + ENRICHED: creditScore (from EDC)    ◄────────────┘ │
+│    Output : medicalScore, riskCategory, loadingFactor ──────┐  │
+└─────────────────────────────────────────────────────────────────┘
+        │                                                     │
+        ▼                                                     │
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 4 ─ KYC_API                  *** SKELETON — TODO ***     │
+│    Input  : stringval45,1,2,4,117 + (address params TBD)        │
+│    Output : status (logged only — no downstream enrichment yet) │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 5 ─ PREMIUM_CALC_API         *** SKELETON — TODO ***     │
+│    Input  : stringval50,51,52,70                               │
+│           + ENRICHED: ageAtEntry (from Eligibility) ◄──────────┘│
+│           + ENRICHED: riskCategory, loadingFactor (from Medical)◄┘
+│    Output : calculatedPremium, frequency  ──────────────────┐  │
+└─────────────────────────────────────────────────────────────────┘
+        │                                                     │
+        ▼                                                     │
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 6 ─ UNDERWRITING_API         *** SKELETON — TODO ***     │
+│    Input  : stringval50,51,52                                   │
+│           + ENRICHED: creditScore (EDC), pasaScore (PASA),      │
+│             tasaRiskCategory (TASA), medicalScore,              │
+│             medicalRiskCategory, loadingFactor (Medical) ◄──────┘
+│    Output : decision  ──────────────────────────────────────┐  │
+│  !! If decision = DECLINED → Journey STOPS here !!              │
+└─────────────────────────────────────────────────────────────────┘
+        │                                                     │
+        ▼                                                     │
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 7 ─ DOCUMENT_API             *** SKELETON — TODO ***     │
+│    Input  : correlationId (runtime), productCode, applicantName │
+│    Output : documentId  ────────────────────────────────────┐  │
+└─────────────────────────────────────────────────────────────────┘
+        │                                                     │
+        ▼                                                     │
+┌─────────────────────────────────────────────────────────────────┐
+│  Stage 8 ─ PROPOSAL_SUBMIT_API      *** SKELETON — TODO ***     │
+│    Input  : stringval50,51,52                                   │
+│           + ENRICHED: calculatedPremium, frequency ◄────────────┘
+│           + ENRICHED: underwritingDecision ◄────────────────────┘
+│           + ENRICHED: documentId ◄──────────────────────────────┘
+│    Output : proposalNumber  ────────────────────────────────┐  │
+└─────────────────────────────────────────────────────────────────┘
+        │                                                     │
+        ▼                                                     │
+┌─────────────────────────────────────────────────────────────────┐
+│  PAS_API — PasApiClient.buildPasRequest()    *** DETAILED ***   │
+│    Input  : stringval12-16,18,19,20,31,46,47,48,49,            │
+│             99,117,122,130,133                                  │
+│           + ENRICHED: proposalNumber ◄──────────────────────────┘
+│           + ENRICHED: calculatedPremium, frequency (Premium)    │
+│           + HARDCODED: status=DRAFT, ppt=0, all habit flags=false│
+│    Output : applicationNumber  (stored in DB)                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-> **Retry behaviour:** Any failed stage can be resumed. `journey_stage_log` records each API call with `status = SUCCESS / FAILED`. On retry, stages with `SUCCESS` in the log are skipped.
+---
+
+## 2. Inter-API Output → Input Data Flow
+
+This table shows every response field that becomes an input to a later API.
+All enrichment is done explicitly in `JourneyOrchestrator.java` after `resolveAs()` returns.
+
+| From API | Response Field | Java Getter | To API | Request Field | Set In Code |
+|----------|---------------|-------------|--------|---------------|-------------|
+| ELIGIBILITY_API | `eligibilityId` | `getEligibilityId()` | MEDICAL_API | `eligibilityId` | `req.setEligibilityId(context.getEligibilityResult().getEligibilityId())` |
+| ELIGIBILITY_API | `ageAtEntry` | `getAgeAtEntry()` | MEDICAL_API | `ageAtEntry` | `req.setAgeAtEntry(context.getEligibilityResult().getAgeAtEntry())` |
+| ELIGIBILITY_API | `ageAtEntry` | `getAgeAtEntry()` | PREMIUM_CALC_API | `ageAtEntry` | `req.setAgeAtEntry(context.getEligibilityResult().getAgeAtEntry())` |
+| EDC_API | `creditScore` | `getCreditScore()` | MEDICAL_API | `creditScore` | `req.setCreditScore(context.getEdcResult().getCreditScore())` |
+| EDC_API | `creditScore` | `getCreditScore()` | UNDERWRITING_API | `creditScore` | `req.setCreditScore(context.getEdcResult().getCreditScore())` |
+| PASA_API | `pasaScore` | `getPasaScore()` | UNDERWRITING_API | `pasaScore` | `req.setPasaScore(context.getPasaResult().getPasaScore())` |
+| TASA_API | `riskCategory` | `getRiskCategory()` | UNDERWRITING_API | `tasaRiskCategory` | `req.setTasaRiskCategory(context.getTasaResult().getRiskCategory())` |
+| MEDICAL_API | `riskCategory` | `getRiskCategory()` | PREMIUM_CALC_API | `riskCategory` | `req.setRiskCategory(context.getMedicalResult().getRiskCategory())` |
+| MEDICAL_API | `loadingFactor` | `getLoadingFactor()` | PREMIUM_CALC_API | `loadingFactor` | `req.setLoadingFactor(context.getMedicalResult().getLoadingFactor())` |
+| MEDICAL_API | `medicalScore` | `getMedicalScore()` | UNDERWRITING_API | `medicalScore` | `req.setMedicalScore(context.getMedicalResult().getMedicalScore())` |
+| MEDICAL_API | `riskCategory` | `getRiskCategory()` | UNDERWRITING_API | `medicalRiskCategory` | `req.setMedicalRiskCategory(context.getMedicalResult().getRiskCategory())` |
+| MEDICAL_API | `loadingFactor` | `getLoadingFactor()` | UNDERWRITING_API | `loadingFactor` | `req.setLoadingFactor(context.getMedicalResult().getLoadingFactor())` |
+| PREMIUM_CALC_API | `calculatedPremium` | `getCalculatedPremium()` | PROPOSAL_SUBMIT_API | `calculatedPremium` | `req.setCalculatedPremium(context.getPremiumResult().getCalculatedPremium())` |
+| PREMIUM_CALC_API | `frequency` | `getFrequency()` | PROPOSAL_SUBMIT_API | `frequency` | `req.setFrequency(context.getPremiumResult().getFrequency())` |
+| PREMIUM_CALC_API | `calculatedPremium` | `getCalculatedPremium()` | PAS_API | `productDetailsDTO.premiumAmount` | `productDetails.setPremiumAmount(...)` in `buildProductDetails()` |
+| PREMIUM_CALC_API | `frequency` | `getFrequency()` | PAS_API | `productDetailsDTO.premFrequency` | `productDetails.setPremFrequency(...)` in `buildProductDetails()` |
+| UNDERWRITING_API | `decision` | `getDecision()` | PROPOSAL_SUBMIT_API | `underwritingDecision` | `req.setUnderwritingDecision(context.getUnderwritingResult().getDecision())` |
+| UNDERWRITING_API | `decision` (null check) | — | PAS_API | `integrations[AWS]` | If `underwritingResult != null` → adds AWS integration entry |
+| MEDICAL_API | result (null check) | — | PAS_API | `integrations[MRS]` | If `medicalResult != null` → adds MRS integration entry |
+| DOCUMENT_API | `documentId` | `getDocumentId()` | PROPOSAL_SUBMIT_API | `documentId` | `req.setDocumentId(context.getDocumentResult().getDocumentId())` |
+| PROPOSAL_SUBMIT_API | `proposalNumber` | `getProposalNumber()` | PAS_API | `request.proposalNumber` | `body.setProposalNumber(context.getProposalResult().getProposalNumber())` |
 
 ---
 
-## How Mappings Work
+## 3. Inbound Params Master Reference
 
-Partner sends up to 600 generic params (`stringval1` … `stringvalN`).
-The `partner_field_mapping` DB table translates them to typed API fields:
+All known `stringvalN` assignments across all APIs. Source: POJO comments + `PasApiClient.java` direct `raw.get()` calls.
 
-```
-partner_field_mapping columns:
-  partner_code   — e.g. PARTNER_A
-  source_param   — e.g. stringval1
-  target_api     — e.g. ELIGIBILITY_API
-  target_field   — e.g. firstName  (must EXACTLY match Java field name in POJO)
-  data_type      — STRING / INTEGER / DECIMAL / BOOLEAN / DATE
-  is_mandatory   — true/false
-  default_value  — fallback when partner sends blank
-  transformation — TRIM / UPPERCASE / LOWERCASE
-  date_format    — e.g. dd/MM/yyyy (only for DATE type)
-  is_active      — false = row is ignored (soft-disable)
-```
-
-**Priority of resolution per field:**
-1. Partner's raw `stringvalN` value
-2. `default_value` from DB (if raw is blank)
-3. Mandatory check — if still null, exception with ALL missing fields listed
-4. Not mandatory + blank → field omitted (POJO field is `null`)
-
----
-
----
-
-## API 1: ELIGIBILITY\_API
-
-**Stage:** 1 (first — must pass before any other stage)
-**DB key (target_api):** `ELIGIBILITY_API`
-**POJO:** `EligibilityRequest.java`
-**Orchestrator method:** `executeEligibilityStage()`
-**Retry:** `@Retryable` on `EligibilityApiClient.call()` — 3 attempts, 2 s / 4 s backoff
-
-| # | API Field | Source Param | Data Type | Mandatory | Transformation | LOV / Default | Source Type | BA Comment / Mapping Status |
-|---|-----------|--------------|-----------|-----------|----------------|---------------|-------------|------------------------------|
-| 1 | `firstName` | `stringval1` | STRING | Yes | TRIM | — | DB Mapping | Confirmed |
-| 2 | `lastName` | `stringval2` | STRING | Yes | TRIM | — | DB Mapping | Confirmed |
-| 3 | `middleName` | `stringval3` | STRING | No | TRIM | — | DB Mapping | Optional; partner may omit |
-| 4 | `dateOfBirth` | `stringval4` | DATE | Yes | — | Format: `dd/MM/yyyy` | DB Mapping | Date format must match DB `date_format` column |
-| 5 | `gender` | `stringval5` | STRING | No | UPPERCASE | **LOV:** `MALE`, `FEMALE` / **Default:** `MALE` | DB Mapping | Default applied when blank |
-| 6 | `maritalStatus` | `stringval6` | STRING | No | UPPERCASE | **LOV:** `SINGLE`, `MARRIED`, `DIVORCED` | DB Mapping | TODO: Confirm full LOV with API contract |
-| 7 | `nationality` | `stringval7` | STRING | No | UPPERCASE | **Default:** `INDIAN` | DB Mapping | Default applied when blank |
-| 8 | `mobileNumber` | `stringval10` | STRING | Yes | — | — | DB Mapping | Confirmed |
-| 9 | `emailAddress` | `stringval11` | STRING | No | LOWERCASE | — | DB Mapping | Optional |
-| 10 | `panNumber` | `stringval45` | STRING | Yes | UPPERCASE | — | DB Mapping | Confirmed |
-| 11 | `productCode` | `stringval50` | STRING | Yes | — | — | DB Mapping | Confirmed |
-| 12 | `policyTerm` | `stringval51` | INTEGER | Yes | — | — | DB Mapping | Confirmed |
-| 13 | `sumAssured` | `stringval52` | DECIMAL | Yes | — | — | DB Mapping | Confirmed |
-
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `eligibilityId` | MEDICAL_API | `req.setEligibilityId(...)` in orchestrator |
-| `ageAtEntry` | MEDICAL_API, PREMIUM_CALC_API | `req.setAgeAtEntry(...)` in orchestrator |
-| `status` | Logged | Journey log |
+| stringvalN | Logical Field | Data Type | Used By APIs | Notes / LOV / Default |
+|------------|--------------|-----------|-------------|----------------------|
+| `stringval1` | IP firstName | String | ELIGIBILITY, SCORING, MEDICAL | TRIM |
+| `stringval2` | IP lastName | String | ELIGIBILITY, SCORING, MEDICAL | TRIM |
+| `stringval3` | IP middleName | String | ELIGIBILITY | TRIM, optional |
+| `stringval4` | IP dateOfBirth | Date | ELIGIBILITY, SCORING, MEDICAL | Format: `dd/MM/yyyy` |
+| `stringval5` | gender | String | ELIGIBILITY | UPPERCASE; LOV: `MALE`,`FEMALE`; Default: `MALE` |
+| `stringval6` | maritalStatus | String | ELIGIBILITY | UPPERCASE; LOV: `SINGLE`,`MARRIED`,`DIVORCED` |
+| `stringval7` | nationality | String | ELIGIBILITY | UPPERCASE; Default: `INDIAN` |
+| `stringval10` | mobileNumber | String | ELIGIBILITY | Mandatory |
+| `stringval11` | emailAddress | String | ELIGIBILITY | LOWERCASE |
+| `stringval12` | IP salutation | String | PAS (basicPolicyInsured, ipBasicDetails) | — |
+| `stringval13` | IP firstName | String | PAS (basicPolicyInsured, ipBasicDetails) | — |
+| `stringval14` | IP middleName | String | PAS (basicPolicyInsured, ipBasicDetails) | — |
+| `stringval15` | IP lastName | String | PAS (basicPolicyInsured, ipBasicDetails) | — |
+| `stringval16` | IP dateOfBirth | String | PAS (basicPolicyInsured, ipBasicDetails) | Passed as String (not Date) to PAS |
+| `stringval18` | IP gender | String | PAS (basicPolicyInsured, ipBasicDetails) | M→MALE, F→FEMALE (Fix 3) |
+| `stringval19` | mobileNumber | String | PAS (IP/PH/Payer contactDetails) | Wrapped in `PhoneNumber` object |
+| `stringval20` | emailAddress | String | PAS (IP/PH/Payer contactDetails) | Wrapped in `EmailAddress` object (Fix 1) |
+| `stringval31` | baseCoverageCode | String | PAS (productSelection) | — |
+| `stringval45` | panNumber | String | ELIGIBILITY, SCORING, MEDICAL, KYC | UPPERCASE, Mandatory |
+| `stringval46` | PH firstName | String | PAS (phBasicDetails) | — |
+| `stringval47` | PH relationshipToIP | String | PAS (phDetails) | Default: `""` empty string if null (Fix 8) |
+| `stringval48` | PH dateOfBirth | String | PAS (phBasicDetails) | — |
+| `stringval49` | PH/Payer gender | String | PAS (phBasicDetails, payerBasicDetails) | M→MALE, F→FEMALE (Fix 6, Fix 8) |
+| `stringval50` | productCode | String | ELIGIBILITY, PREMIUM_CALC, UNDERWRITING, PROPOSAL | — |
+| `stringval51` | policyTerm | Integer | ELIGIBILITY, SCORING, MEDICAL, PREMIUM_CALC, UNDERWRITING, PROPOSAL | — |
+| `stringval52` | sumAssured | Decimal | ELIGIBILITY, SCORING, MEDICAL, PREMIUM_CALC, UNDERWRITING, PROPOSAL | — |
+| `stringval60` | annualIncome | Decimal | SCORING (EDC/PASA/TASA) | — |
+| `stringval61` | existingLoans | Decimal | SCORING | Default: `0` |
+| `stringval62` | employmentType | String | SCORING | UPPERCASE; LOV: `SALARIED`,`SELF_EMPLOYED` |
+| `stringval70` | smokingStatus | String | MEDICAL, PREMIUM_CALC | UPPERCASE; Default: `NON_SMOKER` |
+| `stringval71` | alcoholConsumption | String | MEDICAL | UPPERCASE; Default: `NONE` |
+| `stringval72` | existingConditions | String | MEDICAL | Optional |
+| `stringval73` | height | Decimal | MEDICAL | cm, optional |
+| `stringval74` | weight | Decimal | MEDICAL | kg, optional |
+| `stringval99` | IP maritalStatus | String | PAS (ipBasicDetails) | M→MARRIED, S→SINGLE, D→DIVORCED, W→WIDOWED (Fix 4) |
+| `stringval117` | Aadhar number | String | KYC (inferred), PAS (IP/PH/basicPolicyInsured) | Preferred ID proof; if blank → PAN fallback (Fix 2) |
+| `stringval122` | PAN number | String | PAS (IP/PH/basicPolicyInsured) fallback | Used when stringval117 is blank (Fix 2) |
+| `stringval130` | PH annualIncome | String | PAS (phOccupationDetails) | Fix 7: null causes PAS rejection |
+| `stringval133` | PH occupation | String | PAS (phOccupationDetails) | — |
 
 ---
 
----
-
-## API 2: EDC\_API (Credit Score)
-
-**Stage:** 2 — runs in **PARALLEL** with PASA_API and TASA_API
-**DB key (target_api):** `SCORING_API` (shared with PASA and TASA)
-**POJO:** `ScoringRequest.java`
-**Orchestrator method:** `executeScoringStage()` via `CompletableFuture.runAsync()`
-**Retry:** Per-API retry on `ScoringApiClient.callEdc()`
-
-| # | API Field | Source Param | Data Type | Mandatory | Transformation | LOV / Default | Source Type | BA Comment / Mapping Status |
-|---|-----------|--------------|-----------|-----------|----------------|---------------|-------------|------------------------------|
-| 1 | `panNumber` | `stringval45` | STRING | Yes | UPPERCASE | — | DB Mapping | Same as Eligibility |
-| 2 | `firstName` | `stringval1` | STRING | No | TRIM | — | DB Mapping | Reused from Eligibility mapping |
-| 3 | `lastName` | `stringval2` | STRING | No | TRIM | — | DB Mapping | Reused |
-| 4 | `dateOfBirth` | `stringval4` | DATE | No | — | Format: `dd/MM/yyyy` | DB Mapping | Reused |
-| 5 | `annualIncome` | `stringval60` | DECIMAL | No | — | — | DB Mapping | TODO: Confirm if mandatory for EDC |
-| 6 | `existingLoans` | `stringval61` | DECIMAL | No | — | **Default:** `0` | DB Mapping | Default applied when blank |
-| 7 | `employmentType` | `stringval62` | STRING | No | UPPERCASE | **LOV:** `SALARIED`, `SELF_EMPLOYED` | DB Mapping | TODO: Confirm full LOV |
-| 8 | `sumAssured` | `stringval52` | DECIMAL | Yes | — | — | DB Mapping | Confirmed |
-| 9 | `policyTerm` | `stringval51` | INTEGER | Yes | — | — | DB Mapping | Confirmed |
-
-> **Note:** The same `ScoringRequest` object is sent to EDC, PASA, and TASA. If any of these APIs needs a different field, either add it here (others ignore it) or split into separate request classes.
-
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `creditScore` | MEDICAL_API, UNDERWRITING_API | `req.setCreditScore(...)` in orchestrator |
-| `status` | Logged | Journey log |
+## 4. API-by-API Mapping Tables
 
 ---
 
----
+### API 1 — ELIGIBILITY\_API
+**Client:** `EligibilityApiClient.java` · **Request:** `EligibilityRequest.java` · **Response:** `EligibilityResponse.java`
+**Stage:** 1 · First stage — must pass before all others
 
-## API 3: PASA\_API (Financial Score)
+| # | Request Field | Source | InboundRequest Param | Type | Mandatory | LOV / Default | BA Comment |
+|---|--------------|--------|----------------------|------|-----------|---------------|------------|
+| 1 | `firstName` | InboundRequest | `stringval1` | String | Yes | — TRIM | Confirmed |
+| 2 | `lastName` | InboundRequest | `stringval2` | String | Yes | — TRIM | Confirmed |
+| 3 | `middleName` | InboundRequest | `stringval3` | String | No | — TRIM | Optional |
+| 4 | `dateOfBirth` | InboundRequest | `stringval4` | Date | Yes | Format: `dd/MM/yyyy` | Confirmed |
+| 5 | `gender` | InboundRequest | `stringval5` | String | No | LOV: `MALE`,`FEMALE` / Default: `MALE` | Default applied when blank |
+| 6 | `maritalStatus` | InboundRequest | `stringval6` | String | No | LOV: `SINGLE`,`MARRIED`,`DIVORCED` | TODO: Confirm full LOV |
+| 7 | `nationality` | InboundRequest | `stringval7` | String | No | Default: `INDIAN` | — |
+| 8 | `mobileNumber` | InboundRequest | `stringval10` | String | Yes | — | Confirmed |
+| 9 | `emailAddress` | InboundRequest | `stringval11` | String | No | — LOWERCASE | Optional |
+| 10 | `panNumber` | InboundRequest | `stringval45` | String | Yes | — UPPERCASE | Confirmed |
+| 11 | `productCode` | InboundRequest | `stringval50` | String | Yes | — | Confirmed |
+| 12 | `policyTerm` | InboundRequest | `stringval51` | Integer | Yes | — | Confirmed |
+| 13 | `sumAssured` | InboundRequest | `stringval52` | Decimal | Yes | — | Confirmed |
 
-**Stage:** 2 — runs in **PARALLEL** with EDC_API and TASA_API
-**DB key (target_api):** `SCORING_API` (shared request class — see EDC_API table above)
-**POJO:** `ScoringRequest.java`
-**Orchestrator method:** `executeScoringStage()` via `CompletableFuture.runAsync()`
+**Response fields consumed downstream:**
 
-> All input fields are identical to EDC_API (shared `ScoringRequest`). Refer to **API 2** table above.
-
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `pasaScore` | UNDERWRITING_API | `req.setPasaScore(...)` in orchestrator |
-| `scoreGrade` | Logged | Journey log |
-
----
-
----
-
-## API 4: TASA\_API (Risk Score)
-
-**Stage:** 2 — runs in **PARALLEL** with EDC_API and PASA_API
-**DB key (target_api):** `SCORING_API` (shared request class — see EDC_API table above)
-**POJO:** `ScoringRequest.java`
-**Orchestrator method:** `executeScoringStage()` via `CompletableFuture.runAsync()`
-
-> All input fields are identical to EDC_API (shared `ScoringRequest`). Refer to **API 2** table above.
-
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `riskCategory` | UNDERWRITING_API | `req.setTasaRiskCategory(...)` in orchestrator |
+| Response Field | Type | Consumed By | Purpose |
+|---------------|------|-------------|---------|
+| `eligibilityId` | String | MEDICAL_API input | Traceability link |
+| `ageAtEntry` | Integer | MEDICAL_API input, PREMIUM_CALC_API input | Calculated by eligibility service |
+| `status` | String | Logged | `ELIGIBLE` / `NOT_ELIGIBLE` / `PENDING_REVIEW` |
 
 ---
 
----
+### API 2 — EDC\_API (Credit Score)
+### API 3 — PASA\_API (Financial Score)
+### API 4 — TASA\_API (Risk Score)
 
-## API 5: MEDICAL\_API
+**Client:** `ScoringApiClient.java` (single client handles all three) · **Request:** `ScoringRequest.java`
+**Responses:** `EdcResponse.java` · `PasaResponse.java` · `TasaResponse.java`
+**Stage:** 2 · All three run **in parallel** via `CompletableFuture`. Same `ScoringRequest` sent to each.
 
-**Stage:** 3 (after all scoring APIs complete)
-**DB key (target_api):** `MEDICAL_API`
-**POJO:** `MedicalRequest.java`
-**Orchestrator method:** `executeMedicalStage()`
-**Retry:** `@Retryable` on `MedicalApiClient.call()`
+| # | Request Field | Source | InboundRequest Param | Type | Mandatory | LOV / Default | BA Comment |
+|---|--------------|--------|----------------------|------|-----------|---------------|------------|
+| 1 | `panNumber` | InboundRequest | `stringval45` | String | Yes | — UPPERCASE | Confirmed |
+| 2 | `firstName` | InboundRequest | `stringval1` | String | No | — TRIM | — |
+| 3 | `lastName` | InboundRequest | `stringval2` | String | No | — TRIM | — |
+| 4 | `dateOfBirth` | InboundRequest | `stringval4` | Date | No | Format: `dd/MM/yyyy` | — |
+| 5 | `annualIncome` | InboundRequest | `stringval60` | Decimal | No | — | TODO: Is this mandatory for EDC? |
+| 6 | `existingLoans` | InboundRequest | `stringval61` | Decimal | No | Default: `0` | Default when blank |
+| 7 | `employmentType` | InboundRequest | `stringval62` | String | No | LOV: `SALARIED`,`SELF_EMPLOYED` UPPERCASE | TODO: Confirm full LOV |
+| 8 | `sumAssured` | InboundRequest | `stringval52` | Decimal | Yes | — | Confirmed |
+| 9 | `policyTerm` | InboundRequest | `stringval51` | Integer | Yes | — | Confirmed |
 
-| # | API Field | Source Param / Source | Data Type | Mandatory | Transformation | LOV / Default | Source Type | BA Comment / Mapping Status |
-|---|-----------|----------------------|-----------|-----------|----------------|---------------|-------------|------------------------------|
-| 1 | `firstName` | `stringval1` | STRING | Yes | TRIM | — | DB Mapping | Confirmed |
-| 2 | `lastName` | `stringval2` | STRING | Yes | TRIM | — | DB Mapping | Confirmed |
-| 3 | `dateOfBirth` | `stringval4` | DATE | Yes | — | Format: `dd/MM/yyyy` | DB Mapping | Confirmed |
-| 4 | `panNumber` | `stringval45` | STRING | Yes | UPPERCASE | — | DB Mapping | Confirmed |
-| 5 | `sumAssured` | `stringval52` | DECIMAL | Yes | — | — | DB Mapping | Confirmed |
-| 6 | `policyTerm` | `stringval51` | INTEGER | Yes | — | — | DB Mapping | Confirmed |
-| 7 | `smokingStatus` | `stringval70` | STRING | No | UPPERCASE | **Default:** `NON_SMOKER` | DB Mapping | Default applied when blank |
-| 8 | `alcoholConsumption` | `stringval71` | STRING | No | UPPERCASE | **Default:** `NONE` | DB Mapping | Default applied when blank |
-| 9 | `existingConditions` | `stringval72` | STRING | No | — | — | DB Mapping | Partner may not know; optional |
-| 10 | `height` | `stringval73` | DECIMAL | No | — | — (cm) | DB Mapping | Optional |
-| 11 | `weight` | `stringval74` | DECIMAL | No | — | — (kg) | DB Mapping | Optional |
-| 12 | `eligibilityId` | `EligibilityResponse.eligibilityId` | STRING | — | — | — | **ENRICHED** | Set in orchestrator after Stage 1 |
-| 13 | `ageAtEntry` | `EligibilityResponse.ageAtEntry` | INTEGER | — | — | — | **ENRICHED** | Calculated by eligibility service |
-| 14 | `creditScore` | `EdcResponse.creditScore` | INTEGER | — | — | — | **ENRICHED** | Set in orchestrator after EDC (Stage 2) |
+> **Note:** Orchestrator has a TODO to enrich `ScoringRequest` from `eligibilityResult` if scoring APIs need any eligibility fields.
 
-**Response fields used by downstream stages:**
+**Response fields consumed downstream:**
 
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `riskCategory` | PREMIUM_CALC_API, UNDERWRITING_API | `req.setRiskCategory(...)` / `req.setMedicalRiskCategory(...)` |
-| `loadingFactor` | PREMIUM_CALC_API, UNDERWRITING_API | `req.setLoadingFactor(...)` |
-| `medicalScore` | UNDERWRITING_API | `req.setMedicalScore(...)` |
-| `status` | PAS_API integrations block | If medicalResult != null, `MRS` integration added to PAS request |
+| API | Response Field | Type | Consumed By | Purpose |
+|-----|---------------|------|-------------|---------|
+| EDC_API | `creditScore` | Integer | MEDICAL_API, UNDERWRITING_API | Bureau credit score |
+| EDC_API | `status` | String | Logged | `PASS` / `FAIL` / `REFER` |
+| PASA_API | `pasaScore` | Integer | UNDERWRITING_API | Financial score |
+| PASA_API | `scoreGrade` | String | Logged | `A` / `B` / `C` / `D` |
+| TASA_API | `riskCategory` | String | UNDERWRITING_API | `LOW` / `MEDIUM` / `HIGH` |
+| TASA_API | `status` | String | Logged | — |
 
 ---
 
+### API 5 — MEDICAL\_API
+**Client:** `MedicalApiClient.java` · **Request:** `MedicalRequest.java` · **Response:** `MedicalResponse.java`
+**Stage:** 3 · Runs after ALL scoring APIs complete
+
+| # | Request Field | Source | InboundRequest Param / Prior API | Type | Mandatory | LOV / Default | BA Comment |
+|---|--------------|--------|----------------------------------|------|-----------|---------------|------------|
+| 1 | `firstName` | InboundRequest | `stringval1` | String | Yes | — TRIM | Confirmed |
+| 2 | `lastName` | InboundRequest | `stringval2` | String | Yes | — TRIM | Confirmed |
+| 3 | `dateOfBirth` | InboundRequest | `stringval4` | Date | Yes | Format: `dd/MM/yyyy` | Confirmed |
+| 4 | `panNumber` | InboundRequest | `stringval45` | String | Yes | — UPPERCASE | Confirmed |
+| 5 | `sumAssured` | InboundRequest | `stringval52` | Decimal | Yes | — | Confirmed |
+| 6 | `policyTerm` | InboundRequest | `stringval51` | Integer | Yes | — | Confirmed |
+| 7 | `smokingStatus` | InboundRequest | `stringval70` | String | No | Default: `NON_SMOKER` UPPERCASE | Default when blank |
+| 8 | `alcoholConsumption` | InboundRequest | `stringval71` | String | No | Default: `NONE` UPPERCASE | Default when blank |
+| 9 | `existingConditions` | InboundRequest | `stringval72` | String | No | — | Optional; partner may not know |
+| 10 | `height` | InboundRequest | `stringval73` | Decimal | No | — (cm) | Optional |
+| 11 | `weight` | InboundRequest | `stringval74` | Decimal | No | — (kg) | Optional |
+| 12 | `eligibilityId` | **ENRICHED** | `EligibilityResponse.eligibilityId` | String | — | — | Set in orchestrator after Stage 1 |
+| 13 | `ageAtEntry` | **ENRICHED** | `EligibilityResponse.ageAtEntry` | Integer | — | — | Set in orchestrator after Stage 1 |
+| 14 | `creditScore` | **ENRICHED** | `EdcResponse.creditScore` | Integer | — | — | Set in orchestrator after EDC (Stage 2) |
+
+**Response fields consumed downstream:**
+
+| Response Field | Type | Consumed By | Purpose |
+|---------------|------|-------------|---------|
+| `medicalScore` | Integer | UNDERWRITING_API | Health score |
+| `riskCategory` | String | PREMIUM_CALC_API, UNDERWRITING_API | `STANDARD` / `SUBSTANDARD` / `DECLINED` |
+| `loadingFactor` | Decimal | PREMIUM_CALC_API, UNDERWRITING_API | Extra premium % due to health risk |
+| `status` (null check) | — | PAS_API | If `medicalResult != null` → `MRS` integration added to PAS request |
+
 ---
 
-## API 6: KYC\_API
-
+### API 6 — KYC\_API
+**Client:** `KycApiClient.java` · **Request:** `KycRequest.java` · **Response:** `KycResponse.java`
 **Stage:** 4
-**DB key (target_api):** `KYC_API`
-**POJO:** `KycRequest.java`
-**Orchestrator method:** `executeKycStage()`
-**Retry:** `@Retryable` on `KycApiClient.call()`
+**STATUS: SKELETON — Contract not yet implemented. Fields below are placeholder/inferred.**
 
-> **STATUS: INCOMPLETE — FIELDS ARE PLACEHOLDER / TODO**
-> `KycRequest.java` contains stub fields only. The full KYC API contract has not been implemented yet.
+| # | Request Field | Source | InboundRequest Param | Type | Mandatory | BA Comment |
+|---|--------------|--------|----------------------|------|-----------|------------|
+| 1 | `panNumber` | InboundRequest | `stringval45` (inferred) | String | Yes | **TODO: Confirm with KYC API contract** |
+| 2 | `firstName` | InboundRequest | `stringval1` (inferred) | String | Yes | **TODO: Confirm** |
+| 3 | `lastName` | InboundRequest | `stringval2` (inferred) | String | Yes | **TODO: Confirm** |
+| 4 | `dateOfBirth` | InboundRequest | `stringval4` (inferred) | Date | Yes | **TODO: Confirm** |
+| 5 | `aadhaarNumber` | InboundRequest | `stringval117` (inferred) | String | No | **TODO: Confirm; same param used in PAS** |
+| 6 | `addressLine1` | InboundRequest | **UNKNOWN — param not mapped** | String | ? | **TODO: Identify source stringvalN** |
+| 7 | `city` | InboundRequest | **UNKNOWN — param not mapped** | String | ? | **TODO: Identify source stringvalN** |
+| 8 | `pincode` | InboundRequest | **UNKNOWN — param not mapped** | String | ? | **TODO: Identify source stringvalN** |
 
-| # | API Field | Source Param | Data Type | Mandatory | Transformation | LOV / Default | Source Type | BA Comment / Mapping Status |
-|---|-----------|--------------|-----------|-----------|----------------|---------------|-------------|------------------------------|
-| 1 | `panNumber` | `stringval45` (inferred) | STRING | Yes | UPPERCASE | — | DB Mapping | **TODO:** Confirm source param with KYC API contract |
-| 2 | `firstName` | `stringval1` (inferred) | STRING | Yes | TRIM | — | DB Mapping | **TODO:** Confirm |
-| 3 | `lastName` | `stringval2` (inferred) | STRING | Yes | TRIM | — | DB Mapping | **TODO:** Confirm |
-| 4 | `dateOfBirth` | `stringval4` (inferred) | DATE | Yes | — | Format: `dd/MM/yyyy` | DB Mapping | **TODO:** Confirm |
-| 5 | `aadhaarNumber` | `stringval117` (inferred) | STRING | No | — | — | DB Mapping | **TODO:** Confirm; also used in PAS for ID proof |
-| 6 | `addressLine1` | **Unknown** | STRING | ? | — | — | DB Mapping | **TODO:** Identify source stringvalN |
-| 7 | `city` | **Unknown** | STRING | ? | — | — | DB Mapping | **TODO:** Identify source stringvalN |
-| 8 | `pincode` | **Unknown** | STRING | ? | — | — | DB Mapping | **TODO:** Identify source stringvalN |
+**Response fields consumed downstream:**
 
-> **BA Action Required:** Get KYC API contract and fill all fields. Add corresponding `partner_field_mapping` rows with `target_api = KYC_API`.
-
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `status` | Logged | Journey log — no downstream enrichment currently defined |
+| Response Field | Type | Consumed By | Purpose |
+|---------------|------|-------------|---------|
+| `status` | String | Logged only | `VERIFIED` / `FAILED` / `PENDING` — no downstream enrichment currently |
 
 ---
 
----
-
-## API 7: PREMIUM\_CALC\_API
-
+### API 7 — PREMIUM\_CALC\_API
+**Client:** `PremiumApiClient.java` · **Request:** `PremiumRequest.java` · **Response:** `PremiumResponse.java`
 **Stage:** 5
-**DB key (target_api):** `PREMIUM_CALC_API`
-**POJO:** `PremiumRequest.java`
-**Orchestrator method:** `executePremiumStage()`
-**Retry:** `@Retryable` on `PremiumApiClient.call()`
+**STATUS: SKELETON — TODO note in POJO; contract fields not confirmed**
 
-> **STATUS: PARTIAL — TODO note in POJO for full contract fields**
+| # | Request Field | Source | InboundRequest Param / Prior API | Type | Mandatory | BA Comment |
+|---|--------------|--------|----------------------------------|------|-----------|------------|
+| 1 | `sumAssured` | InboundRequest | `stringval52` | Decimal | Yes | Confirmed |
+| 2 | `policyTerm` | InboundRequest | `stringval51` | Integer | Yes | Confirmed |
+| 3 | `productCode` | InboundRequest | `stringval50` | String | Yes | Confirmed |
+| 4 | `smokingStatus` | InboundRequest | `stringval70` (inferred) | String | No | **TODO: Confirm if premium API needs this** |
+| 5 | `ageAtEntry` | **ENRICHED** | `EligibilityResponse.ageAtEntry` | Integer | — | Set in orchestrator after Stage 1 |
+| 6 | `riskCategory` | **ENRICHED** | `MedicalResponse.riskCategory` | String | — | Set in orchestrator after Stage 3 |
+| 7 | `loadingFactor` | **ENRICHED** | `MedicalResponse.loadingFactor` | Decimal | — | Set in orchestrator after Stage 3 |
 
-| # | API Field | Source Param / Source | Data Type | Mandatory | Transformation | LOV / Default | Source Type | BA Comment / Mapping Status |
-|---|-----------|----------------------|-----------|-----------|----------------|---------------|-------------|------------------------------|
-| 1 | `sumAssured` | `stringval52` | DECIMAL | Yes | — | — | DB Mapping | Confirmed |
-| 2 | `policyTerm` | `stringval51` | INTEGER | Yes | — | — | DB Mapping | Confirmed |
-| 3 | `productCode` | `stringval50` | STRING | Yes | — | — | DB Mapping | Confirmed |
-| 4 | `smokingStatus` | `stringval70` (inferred) | STRING | No | UPPERCASE | **Default:** `NON_SMOKER` | DB Mapping | **TODO:** Confirm if premium API needs this |
-| 5 | `ageAtEntry` | `EligibilityResponse.ageAtEntry` | INTEGER | — | — | — | **ENRICHED** | Set in orchestrator after Stage 1 |
-| 6 | `riskCategory` | `MedicalResponse.riskCategory` | STRING | — | — | — | **ENRICHED** | Set in orchestrator after Stage 3 |
-| 7 | `loadingFactor` | `MedicalResponse.loadingFactor` | DECIMAL | — | — | — | **ENRICHED** | Set in orchestrator after Stage 3 |
+**Response fields consumed downstream:**
 
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `calculatedPremium` | PROPOSAL_SUBMIT_API, PAS_API | `req.setCalculatedPremium(...)` / `productDetails.setPremiumAmount(...)` |
-| `frequency` | PROPOSAL_SUBMIT_API, PAS_API | `req.setFrequency(...)` / `productDetails.setPremFrequency(...)` |
+| Response Field | Type | Consumed By | Purpose |
+|---------------|------|-------------|---------|
+| `calculatedPremium` | Decimal | PROPOSAL_SUBMIT_API, PAS_API | Final premium amount |
+| `frequency` | String | PROPOSAL_SUBMIT_API, PAS_API | `ANNUAL` / `SEMI_ANNUAL` / `QUARTERLY` / `MONTHLY` |
 
 ---
 
----
-
-## API 8: UNDERWRITING\_API
-
+### API 8 — UNDERWRITING\_API
+**Client:** `UnderwritingApiClient.java` · **Request:** `UnderwritingRequest.java` · **Response:** `UnderwritingResponse.java`
 **Stage:** 6
-**DB key (target_api):** `UNDERWRITING_API`
-**POJO:** `UnderwritingRequest.java`
-**Orchestrator method:** `executeUnderwritingStage()`
-**Retry:** `@Retryable` on `UnderwritingApiClient.call()`
+**CRITICAL: If `decision = DECLINED` → `JourneyStageException` thrown → journey stops. No Document or Proposal runs.**
+**STATUS: SKELETON — TODO note in POJO; contract fields not confirmed**
 
-> **CRITICAL:** If underwriting `decision = DECLINED`, the journey stops immediately. No document or proposal stage runs.
+| # | Request Field | Source | InboundRequest Param / Prior API | Type | Mandatory | BA Comment |
+|---|--------------|--------|----------------------------------|------|-----------|------------|
+| 1 | `sumAssured` | InboundRequest | `stringval52` | Decimal | Yes | Confirmed |
+| 2 | `policyTerm` | InboundRequest | `stringval51` | Integer | Yes | Confirmed |
+| 3 | `productCode` | InboundRequest | `stringval50` | String | Yes | Confirmed |
+| 4 | `creditScore` | **ENRICHED** | `EdcResponse.creditScore` | Integer | — | Set after Stage 2 (EDC) |
+| 5 | `pasaScore` | **ENRICHED** | `PasaResponse.pasaScore` | Integer | — | Set after Stage 2 (PASA) |
+| 6 | `tasaRiskCategory` | **ENRICHED** | `TasaResponse.riskCategory` | String | — | Set after Stage 2 (TASA) |
+| 7 | `medicalScore` | **ENRICHED** | `MedicalResponse.medicalScore` | Integer | — | Set after Stage 3 |
+| 8 | `medicalRiskCategory` | **ENRICHED** | `MedicalResponse.riskCategory` | String | — | Set after Stage 3 |
+| 9 | `loadingFactor` | **ENRICHED** | `MedicalResponse.loadingFactor` | Decimal | — | Set after Stage 3 |
 
-> **STATUS: PARTIAL — TODO note in POJO for full contract fields**
+**Response fields consumed downstream:**
 
-| # | API Field | Source Param / Source | Data Type | Mandatory | Transformation | LOV / Default | Source Type | BA Comment / Mapping Status |
-|---|-----------|----------------------|-----------|-----------|----------------|---------------|-------------|------------------------------|
-| 1 | `sumAssured` | `stringval52` | DECIMAL | Yes | — | — | DB Mapping | Confirmed |
-| 2 | `policyTerm` | `stringval51` | INTEGER | Yes | — | — | DB Mapping | Confirmed |
-| 3 | `productCode` | `stringval50` | STRING | Yes | — | — | DB Mapping | Confirmed |
-| 4 | `creditScore` | `EdcResponse.creditScore` | INTEGER | — | — | — | **ENRICHED** | Set in orchestrator after Stage 2 (EDC) |
-| 5 | `pasaScore` | `PasaResponse.pasaScore` | INTEGER | — | — | — | **ENRICHED** | Set in orchestrator after Stage 2 (PASA) |
-| 6 | `tasaRiskCategory` | `TasaResponse.riskCategory` | STRING | — | — | — | **ENRICHED** | Set in orchestrator after Stage 2 (TASA) |
-| 7 | `medicalScore` | `MedicalResponse.medicalScore` | INTEGER | — | — | — | **ENRICHED** | Set in orchestrator after Stage 3 |
-| 8 | `medicalRiskCategory` | `MedicalResponse.riskCategory` | STRING | — | — | — | **ENRICHED** | Set in orchestrator after Stage 3 |
-| 9 | `loadingFactor` | `MedicalResponse.loadingFactor` | DECIMAL | — | — | — | **ENRICHED** | Set in orchestrator after Stage 3 |
-
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `decision` | Journey control | If `DECLINED` → `JourneyStageException` thrown, journey stops |
-| `decisionCode` | Journey exception | Included in exception message |
-| `decision` | PROPOSAL_SUBMIT_API | `req.setUnderwritingDecision(...)` |
-| `decision` | PAS_API | If `underwritingResult != null` → AWS integration added to PAS request |
+| Response Field | Type | Consumed By | Purpose |
+|---------------|------|-------------|---------|
+| `decision` | String | PROPOSAL_SUBMIT_API | `APPROVED` / `DECLINED` / `REFERRED` |
+| `decisionCode` | String | Journey exception | Included in exception message on DECLINED |
+| `decision` (null check) | — | PAS_API | If `underwritingResult != null` → `AWS` integration entry added |
 
 ---
 
----
-
-## API 9: DOCUMENT\_API
-
+### API 9 — DOCUMENT\_API
+**Client:** `DocumentApiClient.java` · **Request:** `DocumentRequest.java` · **Response:** `DocumentResponse.java`
 **Stage:** 7
-**DB key (target_api):** `DOCUMENT_API`
-**POJO:** `DocumentRequest.java`
-**Orchestrator method:** `executeDocumentStage()`
-**Retry:** `@Retryable` on `DocumentApiClient.call()`
+**STATUS: SKELETON — Most fields are TODO. Only `correlationId` explicitly set in orchestrator.**
 
-> **STATUS: INCOMPLETE — Most fields are TODO. Only correlationId is explicitly set.**
+| # | Request Field | Source | InboundRequest Param / Context | Type | Mandatory | BA Comment |
+|---|--------------|--------|-------------------------------|------|-----------|------------|
+| 1 | `correlationId` | Runtime context | `context.getCorrelationId()` | String | Yes | **HARDCODED** from journey context (UUID) |
+| 2 | `productCode` | InboundRequest | `stringval50` (inferred) | String | ? | **TODO: Confirm with DOCUMENT_API contract** |
+| 3 | `applicantName` | InboundRequest | **UNKNOWN** | String | ? | **TODO: Derived from stringval1+stringval2? Confirm format** |
 
-| # | API Field | Source Param / Source | Data Type | Mandatory | Transformation | LOV / Default | Source Type | BA Comment / Mapping Status |
-|---|-----------|----------------------|-----------|-----------|----------------|---------------|-------------|------------------------------|
-| 1 | `correlationId` | `context.getCorrelationId()` | STRING | Yes | — | — | **HARDCODED (runtime)** | Set from journey context, not partner params |
-| 2 | `productCode` | `stringval50` (inferred) | STRING | ? | — | — | DB Mapping | **TODO:** Confirm with DOCUMENT_API contract |
-| 3 | `applicantName` | Derived from name fields (inferred) | STRING | ? | — | — | DB Mapping | **TODO:** Confirm source param and format |
+**Response fields consumed downstream:**
 
-> **BA Action Required:** Get full DOCUMENT_API contract. Add all fields to `DocumentRequest.java` and add `partner_field_mapping` rows with `target_api = DOCUMENT_API`.
-
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `documentId` | PROPOSAL_SUBMIT_API | `req.setDocumentId(...)` |
+| Response Field | Type | Consumed By | Purpose |
+|---------------|------|-------------|---------|
+| `documentId` | String | PROPOSAL_SUBMIT_API | Document reference |
 
 ---
 
----
+### API 10 — PROPOSAL\_SUBMIT\_API
+**Client:** `ProposalApiClient.java` · **Request:** `ProposalRequest.java` · **Response:** `ProposalResponse.java`
+**Stage:** 8 · Final stage before PAS
+**STATUS: SKELETON — TODO note in POJO**
 
-## API 10: PROPOSAL\_SUBMIT\_API
+| # | Request Field | Source | InboundRequest Param / Prior API | Type | Mandatory | BA Comment |
+|---|--------------|--------|----------------------------------|------|-----------|------------|
+| 1 | `productCode` | InboundRequest | `stringval50` | String | Yes | Confirmed |
+| 2 | `sumAssured` | InboundRequest | `stringval52` | Decimal | Yes | Confirmed |
+| 3 | `policyTerm` | InboundRequest | `stringval51` | Integer | Yes | Confirmed |
+| 4 | `applicantName` | InboundRequest | **UNKNOWN** | String | ? | **TODO: stringval1+stringval2? Confirm** |
+| 5 | `calculatedPremium` | **ENRICHED** | `PremiumResponse.calculatedPremium` | Decimal | — | Set after Stage 5 |
+| 6 | `frequency` | **ENRICHED** | `PremiumResponse.frequency` | String | — | Set after Stage 5 |
+| 7 | `underwritingDecision` | **ENRICHED** | `UnderwritingResponse.decision` | String | — | Set after Stage 6 |
+| 8 | `documentId` | **ENRICHED** | `DocumentResponse.documentId` | String | — | Set after Stage 7 |
 
-**Stage:** 8 (final stage before PAS)
-**DB key (target_api):** `PROPOSAL_SUBMIT_API`
-**POJO:** `ProposalRequest.java`
-**Orchestrator method:** `executeProposalStage()`
-**Retry:** `@Retryable` on `ProposalApiClient.call()`
+**Response fields consumed downstream:**
 
-> **STATUS: PARTIAL — TODO note in POJO for full contract fields**
-
-| # | API Field | Source Param / Source | Data Type | Mandatory | Transformation | LOV / Default | Source Type | BA Comment / Mapping Status |
-|---|-----------|----------------------|-----------|-----------|----------------|---------------|-------------|------------------------------|
-| 1 | `productCode` | `stringval50` | STRING | Yes | — | — | DB Mapping | Confirmed |
-| 2 | `sumAssured` | `stringval52` | DECIMAL | Yes | — | — | DB Mapping | Confirmed |
-| 3 | `policyTerm` | `stringval51` | INTEGER | Yes | — | — | DB Mapping | Confirmed |
-| 4 | `applicantName` | **Unknown** | STRING | ? | — | — | DB Mapping | **TODO:** Confirm source — derived from stringval1+stringval2? |
-| 5 | `calculatedPremium` | `PremiumResponse.calculatedPremium` | DECIMAL | — | — | — | **ENRICHED** | Set in orchestrator after Stage 5 |
-| 6 | `frequency` | `PremiumResponse.frequency` | STRING | — | — | — | **ENRICHED** | Set in orchestrator after Stage 5 |
-| 7 | `underwritingDecision` | `UnderwritingResponse.decision` | STRING | — | — | — | **ENRICHED** | Set in orchestrator after Stage 6 |
-| 8 | `documentId` | `DocumentResponse.documentId` | STRING | — | — | — | **ENRICHED** | Set in orchestrator after Stage 7 |
-
-**Response fields used by downstream stages:**
-
-| Response Field | Used By | How Used |
-|----------------|---------|----------|
-| `proposalNumber` | PAS_API | `body.setProposalNumber(...)` |
+| Response Field | Type | Consumed By | Purpose |
+|---------------|------|-------------|---------|
+| `proposalNumber` | String | PAS_API | Set as `body.proposalNumber` |
 
 ---
 
----
-
-## API 11: PAS\_API (Policy Administration System)
-
-**Stage:** Post-Journey (runs after all 8 stages complete successfully)
-**Handler:** `PasApiClient.java` — `submitAndGetApplicationNumber()`
-**Retry:** `@Retryable` — 3 attempts, 3 s / 6 s backoff
-**Note:** This API is handled separately from the main journey because the `applicationNumber` it returns must be stored in the DB and passed to the reverse feed.
+### API 11 — PAS\_API
+**Client:** `PasApiClient.java` · Method: `buildPasRequest()` → `submitAndGetApplicationNumber()`
+**Stage:** Post-journey · Runs after all 8 stages succeed
+**STATUS: FULLY IMPLEMENTED — All stringvalN directly accessed via `raw.get("stringvalN")`**
 
 ---
 
-### 11a. PAS Header
+#### 11a. Header
 
-| # | PAS Field Path | Source | Hardcoded/Default Value | BA Comment / Mapping Status |
-|---|----------------|--------|-------------------------|-----------------------------|
-| 1 | `header.correlationId` | `context.getCorrelationId()` | — | Auto-set from journey context |
-| 2 | `header.processVars` | — | `new ProcessVars()` (empty object) | **HARDCODED** — empty default |
-
----
-
-### 11b. PAS Request Body — Top Level
-
-| # | PAS Field Path | Source | Hardcoded/Default Value | BA Comment / Mapping Status |
-|---|----------------|--------|-------------------------|-----------------------------|
-| 1 | `request.proposalNumber` | `ProposalResponse.proposalNumber` | — | **ENRICHED** from Stage 8 |
-| 2 | `request.status` | — | `"DRAFT"` | **HARDCODED** — always DRAFT at this point |
+| # | PAS Field | Source | Value / Param | BA Comment |
+|---|-----------|--------|---------------|------------|
+| 1 | `header.correlationId` | Runtime | `context.getCorrelationId()` | Auto-set |
+| 2 | `header.processVars` | **HARDCODED** | `new ProcessVars()` (empty) | TODO: Does PAS need processVars populated? |
 
 ---
 
-### 11c. basicPolicyInsured (IP identity block for PAS)
+#### 11b. Request Body — Top Level
 
-> **Fix 2:** ID proof logic — prefer Aadhar (`stringval117`) if present; fall back to PAN (`stringval122`).
-> **Fix 3:** Gender — map `M` → `MALE`, `F` → `FEMALE`.
-
-| # | PAS Field Path | Source Param | Hardcoded/Default | Transformation / LOV | Source Type | BA Comment / Mapping Status |
-|---|----------------|--------------|-------------------|----------------------|-------------|------------------------------|
-| 1 | `basicPolicyInsured[0].salutation` | `stringval12` | — | — | Direct | Confirmed |
-| 2 | `basicPolicyInsured[0].policyInsuredFirstName` | `stringval13` | — | — | Direct | Confirmed |
-| 3 | `basicPolicyInsured[0].policyInsuredMiddleName` | `stringval14` | — | — | Direct | Optional |
-| 4 | `basicPolicyInsured[0].policyInsuredLastName` | `stringval15` | — | — | Direct | Confirmed |
-| 5 | `basicPolicyInsured[0].policyInsuredDateOfBirth` | `stringval16` | — | — | Direct | Confirmed — passed as string |
-| 6 | `basicPolicyInsured[0].gender` | `stringval18` | — | **M→MALE, F→FEMALE** (Fix 3) | Direct + Transform | LOV: `MALE`, `FEMALE` |
-| 7 | `basicPolicyInsured[0].policyInsuredLegalIdentifierCode` | `stringval117` (Aadhar) | `AADHAR_REFERENCE_CODE` or `PAN` | If stringval117 non-blank → Aadhar (Fix 2) | Conditional | BA to confirm fallback logic is correct |
-| 8 | `basicPolicyInsured[0].policyInsuredLegalIdentifierValue` | `stringval117` or `stringval122` | — | Aadhar preferred; PAN fallback (Fix 2) | Conditional | Confirmed |
+| # | PAS Field | Source | Value / Param | BA Comment |
+|---|-----------|--------|---------------|------------|
+| 1 | `request.proposalNumber` | **ENRICHED** | `ProposalResponse.proposalNumber` (Stage 8) | Confirmed |
+| 2 | `request.status` | **HARDCODED** | `"DRAFT"` | Always DRAFT at submission time |
 
 ---
 
-### 11d. productSelection
+#### 11c. basicPolicyInsured\[0\]
+*(IP identity block — `buildBasicPolicyInsured(raw)`)*
 
-| # | PAS Field Path | Source Param | Hardcoded/Default | BA Comment / Mapping Status |
-|---|----------------|--------------|-------------------|-----------------------------|
-| 1 | `policyCheckIn.productSelection.baseCoverageCode` | `stringval31` | — | Confirmed |
-| 2 | `policyCheckIn.productSelection.branchCode` | **Unknown** | — | **TODO:** Identify source param |
-| 3 | `policyCheckIn.productSelection.policyIssueState` | **Unknown** | — | **TODO:** Identify source param |
-| 4 | `policyCheckIn.productSelection.productPlan` | **Unknown** | — | **TODO:** Identify source param |
-
----
-
-### 11e. bankDetailsDTO
-
-| # | PAS Field Path | Source | BA Comment / Mapping Status |
-|---|----------------|--------|-----------------------------|
-| 1 | `policyCheckIn.bankDetailsDTO` | — | **HARDCODED** — `new BankDetailsDTO()` (empty object). **TODO:** Confirm if bank details need to be populated for final submission |
+| # | PAS Field | InboundRequest Param | Transformation / Fix | BA Comment |
+|---|-----------|----------------------|----------------------|------------|
+| 1 | `salutation` | `stringval12` | — | Confirmed |
+| 2 | `policyInsuredFirstName` | `stringval13` | — | Confirmed |
+| 3 | `policyInsuredMiddleName` | `stringval14` | — | Optional |
+| 4 | `policyInsuredLastName` | `stringval15` | — | Confirmed |
+| 5 | `policyInsuredDateOfBirth` | `stringval16` | Passed as String | Confirmed |
+| 6 | `gender` | `stringval18` | M→`MALE`, F→`FEMALE` **(Fix 3)** | LOV: `MALE`,`FEMALE` |
+| 7 | `policyInsuredLegalIdentifierCode` | `stringval117` (Aadhar check) | If `stringval117` non-blank → `"AADHAR_REFERENCE_CODE"` else `"PAN"` **(Fix 2)** | Code value is hardcoded string |
+| 8 | `policyInsuredLegalIdentifierValue` | `stringval117` or `stringval122` | Aadhar preferred; PAN fallback **(Fix 2)** | Confirmed |
 
 ---
 
-### 11f. integrations
+#### 11d. productSelection
+*(direct `raw.get()` in `buildPasRequest()`)*
 
-| # | Integration Name | Condition | Set When | BA Comment / Mapping Status |
-|---|-----------------|-----------|----------|-----------------------------|
-| 1 | `AWS` | `context.getUnderwritingResult() != null` | Underwriting API completed | **HARDCODED** — name and status (`true`) are fixed |
-| 2 | `MRS` | `context.getMedicalResult() != null` | Medical API completed | **HARDCODED** — name and status (`true`) are fixed |
-
----
-
-### 11g. journeyDetails
-
-| # | PAS Field Path | Source | BA Comment / Mapping Status |
-|---|----------------|--------|-----------------------------|
-| 1 | `policyCheckIn.journeyDetails` | — | **HARDCODED** — `new JourneyDetails()` (empty object). **TODO:** Confirm fields required |
+| # | PAS Field | InboundRequest Param | BA Comment |
+|---|-----------|----------------------|------------|
+| 1 | `baseCoverageCode` | `stringval31` | Confirmed |
+| 2 | `branchCode` | **NOT MAPPED** | **TODO: Identify source stringvalN** |
+| 3 | `policyIssueState` | **NOT MAPPED** | **TODO: Identify source stringvalN** |
+| 4 | `productPlan` | **NOT MAPPED** | **TODO: Identify source stringvalN** |
 
 ---
 
-### 11h. habbitDetailsDTO (Lifestyle flags)
+#### 11e. bankDetailsDTO
 
-> **Fix 5:** All lifestyle boolean flags must be `false` (not `null`) for PAS to accept the request.
-
-| # | PAS Field Path | Hardcoded Value | BA Comment / Mapping Status |
-|---|----------------|-----------------|-----------------------------|
-| 1 | `policyCheckIn.habbitDetailsDTO.isAlcohol` | `false` | **HARDCODED default** — TODO: Map from partner if needed (e.g. stringval71) |
-| 2 | `policyCheckIn.habbitDetailsDTO.isChangeInWeight` | `false` | **HARDCODED default** — TODO: Map from partner if needed |
-| 3 | `policyCheckIn.habbitDetailsDTO.isDGH` | `false` | **HARDCODED default** |
-| 4 | `policyCheckIn.habbitDetailsDTO.isPEP` | `false` | **HARDCODED default** |
-| 5 | `policyCheckIn.habbitDetailsDTO.isSmoker` | `false` | **HARDCODED default** — TODO: Map from stringval70 (smokingStatus) |
-| 6 | `policyCheckIn.habbitDetailsDTO.isTobacco` | `false` | **HARDCODED default** |
-| 7 | `policyCheckIn.habbitDetailsDTO.height` | `null` | **TODO:** Map from stringval73 if PAS needs it |
-| 8 | `policyCheckIn.habbitDetailsDTO.weight` | `null` | **TODO:** Map from stringval74 if PAS needs it |
-| 9 | `policyCheckIn.habbitDetailsDTO.bmi` | `null` | **TODO:** Map or calculate from height/weight |
+| PAS Field | Value | BA Comment |
+|-----------|-------|------------|
+| entire object | `new BankDetailsDTO()` (empty) | **HARDCODED** empty. **TODO: Does PAS need bank fields populated?** |
 
 ---
 
-### 11i. ipDetails — IP (Insured Person) Personal Details
+#### 11f. integrations list
 
-> **Fix 1:** `emailId` must be an `EmailAddress` object — not a bare String.
-> **Fix 2:** ID proof — prefer Aadhar; fall back to PAN.
-> **Fix 3:** Gender — `M`→`MALE`, `F`→`FEMALE`.
-> **Fix 4:** Marital status — `M`→`MARRIED`, `S`→`SINGLE`, `D`→`DIVORCED`, `W`→`WIDOWED`.
-
-| # | PAS Field Path | Source Param | Hardcoded/Default | Transformation / LOV | Source Type | BA Comment / Mapping Status |
-|---|----------------|--------------|-------------------|----------------------|-------------|------------------------------|
-| 1 | `ipDetails.ippersonalDetails.ipBasicDetails.salutation` | `stringval12` | — | — | Direct | Confirmed |
-| 2 | `ipDetails.ippersonalDetails.ipBasicDetails.firstName` | `stringval13` | — | — | Direct | Confirmed |
-| 3 | `ipDetails.ippersonalDetails.ipBasicDetails.middleName` | `stringval14` | — | — | Direct | Optional |
-| 4 | `ipDetails.ippersonalDetails.ipBasicDetails.lastName` | `stringval15` | — | — | Direct | Confirmed |
-| 5 | `ipDetails.ippersonalDetails.ipBasicDetails.dateOfBirth` | `stringval16` | — | — | Direct | Confirmed |
-| 6 | `ipDetails.ippersonalDetails.ipBasicDetails.gender` | `stringval18` | — | **M→MALE, F→FEMALE** (Fix 3) | Direct + Transform | LOV: `MALE`, `FEMALE` |
-| 7 | `ipDetails.ippersonalDetails.ipBasicDetails.maritalStatus` | `stringval99` | — | **M→MARRIED, S→SINGLE, D→DIVORCED, W→WIDOWED** (Fix 4) | Direct + Transform | LOV: `MARRIED`, `SINGLE`, `DIVORCED`, `WIDOWED` |
-| 8 | `ipDetails.ippersonalDetails.ipBasicDetails.idProofDoc` | `stringval117` (Aadhar) | `AADHAR_REFERENCE_CODE` or `PAN` | If Aadhar non-blank → Aadhar; else PAN (Fix 2) | Conditional | Confirmed |
-| 9 | `ipDetails.ippersonalDetails.ipBasicDetails.idProofValue` | `stringval117` or `stringval122` | — | — | Conditional | Confirmed |
-| 10 | `ipDetails.ippersonalDetails.contactDetails.emailId` | `stringval20` | — | Wrapped in `EmailAddress` object (Fix 1) | Direct | Fix 1: bare String causes PAS rejection |
-| 11 | `ipDetails.ippersonalDetails.contactDetails.mobileNumber` | `stringval19` | — | Wrapped in `PhoneNumber` object | Direct | Confirmed |
-| 12 | `ipDetails.kycType` | **Unknown** | `null` | — | — | **TODO:** Confirm if required by PAS |
-| 13 | `ipDetails.currentAddress` | **Unknown** | `null` | — | — | **TODO:** Identify source params for address |
-| 14 | `ipDetails.permanentAddress` | **Unknown** | `null` | — | — | **TODO:** Identify source params for address |
-| 15 | `ipDetails.ipEducationAndOccupationDetails` | **Unknown** | `null` | — | — | **TODO:** Required for IP? |
+| Integration | Condition | `integrationName` | `integrationStatus` | BA Comment |
+|-------------|-----------|-------------------|--------------------|------------|
+| Entry 1 | `context.getUnderwritingResult() != null` | `"AWS"` (**HARDCODED**) | `true` (**HARDCODED**) | Added if UW completed |
+| Entry 2 | `context.getMedicalResult() != null` | `"MRS"` (**HARDCODED**) | `true` (**HARDCODED**) | Added if Medical completed |
 
 ---
 
-### 11j. phDetails — PH (Policyholder) Details
+#### 11g. journeyDetails
 
-> **Fix 1:** email wrapped in `EmailAddress` object.
-> **Fix 7:** `annualIncome` must be set in `occupationDetails`.
-> **Fix 8:** Gender as full string; ID proof with Aadhar-or-PAN; `relationshipToIP` as empty string (not null).
-
-| # | PAS Field Path | Source Param | Hardcoded/Default | Transformation / LOV | Source Type | BA Comment / Mapping Status |
-|---|----------------|--------------|-------------------|----------------------|-------------|------------------------------|
-| 1 | `phDetails.phPersonalDetails.basicPersonDetails.firstName` | `stringval46` | — | — | Direct | Confirmed — separate from IP name |
-| 2 | `phDetails.phPersonalDetails.basicPersonDetails.dateOfBirth` | `stringval48` | — | — | Direct | Confirmed |
-| 3 | `phDetails.phPersonalDetails.basicPersonDetails.gender` | `stringval49` | — | **M→MALE, F→FEMALE** (Fix 8) | Direct + Transform | LOV: `MALE`, `FEMALE` |
-| 4 | `phDetails.phPersonalDetails.basicPersonDetails.idProofDoc` | `stringval117` (Aadhar) | `AADHAR_REFERENCE_CODE` or `PAN` | Aadhar preferred (Fix 8) | Conditional | Same Aadhar/PAN logic as IP |
-| 5 | `phDetails.phPersonalDetails.basicPersonDetails.idProofValue` | `stringval117` or `stringval122` | — | — | Conditional | Confirmed |
-| 6 | `phDetails.phPersonalDetails.basicPersonDetails.lastName` | **Unknown** | `null` | — | — | **TODO:** stringval47 is relationshipToIP — confirm PH last name param |
-| 7 | `phDetails.phPersonalDetails.contactDetails.emailId` | `stringval20` | — | Wrapped in `EmailAddress` object (Fix 1) | Direct | Same email as IP — confirm if PH can have different email |
-| 8 | `phDetails.phPersonalDetails.contactDetails.mobileNumber` | `stringval19` | — | Wrapped in `PhoneNumber` object | Direct | Same mobile as IP — confirm |
-| 9 | `phDetails.phEducationAndOccupationDetails.occupationDetails.annualIncome` | `stringval130` | — | — (Fix 7) | Direct | Fix 7: must be set; PAS rejects if null |
-| 10 | `phDetails.phEducationAndOccupationDetails.occupationDetails.occupation` | `stringval133` | — | — | Direct | Confirmed |
-| 11 | `phDetails.relationshipToIP` | `stringval47` | `""` (empty string, not null) | — (Fix 8) | Direct | Fix 8: null causes PAS rejection; default is empty string |
-| 12 | `phDetails.kycType` | **Unknown** | `null` | — | — | **TODO:** Confirm if required |
-| 13 | `phDetails.currentAddress` | **Unknown** | `null` | — | — | **TODO:** Identify address params |
-| 14 | `phDetails.permanentAddress` | **Unknown** | `null` | — | — | **TODO:** Identify address params |
+| PAS Field | Value | BA Comment |
+|-----------|-------|------------|
+| entire object | `new JourneyDetails()` (empty) | **HARDCODED** empty. **TODO: Confirm fields required by PAS** |
 
 ---
 
-### 11k. payerDetails — Payer Details
+#### 11h. habbitDetailsDTO — Lifestyle flags
+*(all defaults applied in `buildHabbitDetails()` — **Fix 5**)*
 
-> **Fix 1:** email wrapped in `EmailAddress` object.
-> **Fix 6:** Gender must be the full string `MALE`/`FEMALE`.
-
-| # | PAS Field Path | Source Param | Hardcoded/Default | Transformation / LOV | Source Type | BA Comment / Mapping Status |
-|---|----------------|--------------|-------------------|----------------------|-------------|------------------------------|
-| 1 | `payerDetails.payerPersonalDetails.basicPersonDetails.gender` | `stringval49` | — | **M→MALE, F→FEMALE** (Fix 6) | Direct + Transform | LOV: `MALE`, `FEMALE` — using PH gender for payer |
-| 2 | `payerDetails.payerPersonalDetails.contactDetails.emailId` | `stringval20` | — | Wrapped in `EmailAddress` object (Fix 1) | Direct | Same email as IP/PH — confirm if payer can differ |
-| 3 | `payerDetails.payerPersonalDetails.contactDetails.mobileNumber` | `stringval19` | — | Wrapped in `PhoneNumber` object | Direct | Confirmed |
-| 4 | `payerDetails.payerPersonalDetails.basicPersonDetails.firstName` | **Unknown** | `null` | — | — | **TODO:** Is payer always same as PH? Confirm with BA |
-| 5 | `payerDetails.payerPersonalDetails.basicPersonDetails.dateOfBirth` | **Unknown** | `null` | — | — | **TODO:** Confirm payer DOB source param |
-
----
-
-### 11l. productDetailsDTO
-
-> **Fix 9:** `ppt` must be `0` (not null) and `riderDetails` must be an empty list (not null or list with null entries).
-
-| # | PAS Field Path | Source / Value | Source Type | BA Comment / Mapping Status |
-|---|----------------|----------------|-------------|------------------------------|
-| 1 | `productDetailsDTO.premiumAmount` | `PremiumResponse.calculatedPremium` (as String) | **ENRICHED** | From Stage 5 result |
-| 2 | `productDetailsDTO.premFrequency` | `PremiumResponse.frequency` | **ENRICHED** | From Stage 5 result |
-| 3 | `productDetailsDTO.ppt` | `0` | **HARDCODED** (Fix 9) | Always 0; PAS rejects null |
-| 4 | `productDetailsDTO.riderDetails` | `[]` (empty list) | **HARDCODED** (Fix 9) | Always empty list; PAS rejects null |
-| 5 | `productDetailsDTO.productName` | **Unknown** | — | **TODO:** Source param not yet mapped |
-| 6 | `productDetailsDTO.optionOrVariant` | **Unknown** | — | **TODO:** Source param not yet mapped |
-| 7 | `productDetailsDTO.coverage` | **Unknown** | — | **TODO:** Source param not yet mapped |
-| 8 | `productDetailsDTO.fundDetails` | `null` | — | **TODO:** Required for ULIP products? |
+| # | PAS Field | InboundRequest Param | Hardcoded Default | BA Comment |
+|---|-----------|----------------------|-------------------|------------|
+| 1 | `isAlcohol` | **NOT MAPPED** | `false` **(Fix 5)** | **TODO: Should map from `stringval71` (alcoholConsumption)?** |
+| 2 | `isChangeInWeight` | **NOT MAPPED** | `false` **(Fix 5)** | **TODO: Identify source param if needed** |
+| 3 | `isDGH` | **NOT MAPPED** | `false` **(Fix 5)** | **TODO: Identify source param if needed** |
+| 4 | `isPEP` | **NOT MAPPED** | `false` **(Fix 5)** | **TODO: Identify source param if needed** |
+| 5 | `isSmoker` | **NOT MAPPED** | `false` **(Fix 5)** | **TODO: Should map from `stringval70` (smokingStatus)?** |
+| 6 | `isTobacco` | **NOT MAPPED** | `false` **(Fix 5)** | **TODO: Identify source param if needed** |
+| 7 | `height` | `stringval73` available | `null` | **TODO: Should PAS receive height? Already sent to Medical** |
+| 8 | `weight` | `stringval74` available | `null` | **TODO: Should PAS receive weight? Already sent to Medical** |
+| 9 | `bmi` | — | `null` | **TODO: Calculate from height/weight if needed** |
 
 ---
 
----
+#### 11i. ipDetails — IP (Insured Person)
+*(built in `buildIpDetails(raw)`)*
 
-## API 12: REVERSE\_FEED\_API
-
-**Stage:** Post-PAS (after `applicationNumber` is received and stored)
-**Handler:** `DefaultPartnerNotifier.java` — `notify()`
-**Retry:** `@Retryable` — 3 attempts, 5 s / 10 s backoff
-**Auth:** Configured per partner in `partner_config` table (`auth_type`: `BEARER` or `API_KEY`)
-**URL:** Configured per partner in `partner_config` table (`reverse_feed_url`)
-
-| # | Payload Field | Source | Source Type | BA Comment / Mapping Status |
-|---|---------------|--------|-------------|------------------------------|
-| 1 | `correlationId` | `context.getCorrelationId()` | **HARDCODED (runtime)** | Unique journey ID |
-| 2 | `applicationNumber` | PAS response `applicationNumber` | **ENRICHED** (from PAS) | Returned by PAS after successful submission |
-| 3 | *(other fields)* | **Unknown** | — | **TODO:** Define full reverse feed payload contract with partner |
-
-> **Auth configuration (in `partner_config` table):**
-> - `auth_type = BEARER` → sends `Authorization: Bearer <credential>` header
-> - `auth_type = API_KEY` → sends `X-Api-Key: <credential>` header
-> - BASIC auth: **TODO** — not yet implemented in `buildAuthHeaders()`
-
----
+| # | PAS Field Path | InboundRequest Param / Source | Transformation / Fix | BA Comment |
+|---|----------------|-------------------------------|----------------------|------------|
+| 1 | `ippersonalDetails.ipBasicDetails.salutation` | `stringval12` | — | Confirmed |
+| 2 | `ippersonalDetails.ipBasicDetails.firstName` | `stringval13` | — | Confirmed |
+| 3 | `ippersonalDetails.ipBasicDetails.middleName` | `stringval14` | — | Optional |
+| 4 | `ippersonalDetails.ipBasicDetails.lastName` | `stringval15` | — | Confirmed |
+| 5 | `ippersonalDetails.ipBasicDetails.dateOfBirth` | `stringval16` | — | Confirmed |
+| 6 | `ippersonalDetails.ipBasicDetails.gender` | `stringval18` | M→`MALE`, F→`FEMALE` **(Fix 3)** | Confirmed |
+| 7 | `ippersonalDetails.ipBasicDetails.maritalStatus` | `stringval99` | M→`MARRIED` S→`SINGLE` D→`DIVORCED` W→`WIDOWED` **(Fix 4)** | LOV fully mapped |
+| 8 | `ippersonalDetails.ipBasicDetails.idProofDoc` | `stringval117` check | `"AADHAR_REFERENCE_CODE"` or `"PAN"` **(Fix 2)** | Confirmed |
+| 9 | `ippersonalDetails.ipBasicDetails.idProofValue` | `stringval117` or `stringval122` | Aadhar preferred **(Fix 2)** | Confirmed |
+| 10 | `ippersonalDetails.contactDetails.emailId` | `stringval20` | Wrapped in `EmailAddress` object **(Fix 1)** | Bare String causes PAS rejection |
+| 11 | `ippersonalDetails.contactDetails.mobileNumber` | `stringval19` | Wrapped in `PhoneNumber` object | Confirmed |
+| 12 | `currentAddress` | **NOT MAPPED** | `null` | **TODO: Identify address stringvalN params** |
+| 13 | `permanentAddress` | **NOT MAPPED** | `null` | **TODO: Identify address stringvalN params** |
+| 14 | `kycType` | **NOT MAPPED** | `null` | **TODO: Confirm if required** |
+| 15 | `ipEducationAndOccupationDetails` | **NOT MAPPED** | `null` | **TODO: Is IP occupation needed? (PH occupation IS mapped)** |
 
 ---
 
-## Summary: All stringvalN Param Assignments
+#### 11j. phDetails — Policyholder
+*(built in `buildPhDetails(raw)`)*
 
-| stringvalN | Assigned To | API(s) Using It | Notes |
-|------------|------------|------------------|-------|
-| `stringval1` | `firstName` | ELIGIBILITY, SCORING (EDC/PASA/TASA), MEDICAL | Common name field |
-| `stringval2` | `lastName` | ELIGIBILITY, SCORING, MEDICAL | Common name field |
-| `stringval3` | `middleName` | ELIGIBILITY | Optional |
-| `stringval4` | `dateOfBirth` | ELIGIBILITY, SCORING, MEDICAL | Date format: `dd/MM/yyyy` |
-| `stringval5` | `gender` | ELIGIBILITY | UPPERCASE, default MALE |
-| `stringval6` | `maritalStatus` | ELIGIBILITY | UPPERCASE |
-| `stringval7` | `nationality` | ELIGIBILITY | UPPERCASE, default INDIAN |
-| `stringval10` | `mobileNumber` | ELIGIBILITY | Mandatory |
-| `stringval11` | `emailAddress` | ELIGIBILITY | LOWERCASE |
-| `stringval12` | `salutation` | PAS (basicPolicyInsured, ipBasicDetails) | — |
-| `stringval13` | IP `firstName` | PAS (basicPolicyInsured, ipBasicDetails) | — |
-| `stringval14` | IP `middleName` | PAS (basicPolicyInsured, ipBasicDetails) | — |
-| `stringval15` | IP `lastName` | PAS (basicPolicyInsured, ipBasicDetails) | — |
-| `stringval16` | IP `dateOfBirth` | PAS (basicPolicyInsured, ipBasicDetails) | Passed as String |
-| `stringval18` | IP `gender` | PAS (basicPolicyInsured, ipBasicDetails) | M→MALE, F→FEMALE |
-| `stringval19` | `mobileNumber` | PAS (IP contact, PH contact, Payer contact) | Wrapped in PhoneNumber object |
-| `stringval20` | `emailAddress` | PAS (IP contact, PH contact, Payer contact) | Wrapped in EmailAddress object (Fix 1) |
-| `stringval31` | `baseCoverageCode` | PAS (productSelection) | — |
-| `stringval45` | `panNumber` | ELIGIBILITY, SCORING, MEDICAL | UPPERCASE, mandatory |
-| `stringval46` | PH `firstName` | PAS (phBasicDetails) | — |
-| `stringval47` | PH `relationshipToIP` | PAS (phDetails) | Default: `""` (empty string) if null |
-| `stringval48` | PH `dateOfBirth` | PAS (phBasicDetails) | — |
-| `stringval49` | PH/Payer `gender` | PAS (phBasicDetails, payerBasicDetails) | M→MALE, F→FEMALE |
-| `stringval50` | `productCode` | ELIGIBILITY, PREMIUM_CALC, UNDERWRITING, PROPOSAL | — |
-| `stringval51` | `policyTerm` | ELIGIBILITY, SCORING, MEDICAL, PREMIUM_CALC, UNDERWRITING, PROPOSAL | INTEGER |
-| `stringval52` | `sumAssured` | ELIGIBILITY, SCORING, MEDICAL, PREMIUM_CALC, UNDERWRITING, PROPOSAL | DECIMAL |
-| `stringval60` | `annualIncome` | SCORING | DECIMAL |
-| `stringval61` | `existingLoans` | SCORING | DECIMAL, default `0` |
-| `stringval62` | `employmentType` | SCORING | UPPERCASE, LOV: SALARIED/SELF_EMPLOYED |
-| `stringval70` | `smokingStatus` | MEDICAL, PREMIUM_CALC (inferred) | UPPERCASE, default NON_SMOKER |
-| `stringval71` | `alcoholConsumption` | MEDICAL | UPPERCASE, default NONE |
-| `stringval72` | `existingConditions` | MEDICAL | Optional |
-| `stringval73` | `height` | MEDICAL | DECIMAL (cm) |
-| `stringval74` | `weight` | MEDICAL | DECIMAL (kg) |
-| `stringval99` | IP `maritalStatus` | PAS (ipBasicDetails) | M→MARRIED, S→SINGLE, D→DIVORCED, W→WIDOWED |
-| `stringval117` | `aadhaarNumber` / `idProofValue` (Aadhar) | KYC (inferred), PAS (IP, PH, basicPolicyInsured) | Preferred ID proof; fallback to PAN if blank |
-| `stringval122` | `panNumber` / `idProofValue` (PAN) | PAS (IP, PH, basicPolicyInsured) fallback | Fallback when stringval117 is blank |
-| `stringval130` | PH `annualIncome` | PAS (phOccupationDetails) | Fix 7: must not be null |
-| `stringval133` | PH `occupation` | PAS (phOccupationDetails) | — |
-
-> **Note:** stringvalN params for KYC, DOCUMENT, and some PROPOSAL fields are not yet mapped in code. These are marked **TODO** in respective API tables above.
+| # | PAS Field Path | InboundRequest Param / Source | Transformation / Fix | BA Comment |
+|---|----------------|-------------------------------|----------------------|------------|
+| 1 | `phPersonalDetails.basicPersonDetails.firstName` | `stringval46` | — | Confirmed — separate from IP |
+| 2 | `phPersonalDetails.basicPersonDetails.dateOfBirth` | `stringval48` | — | Confirmed |
+| 3 | `phPersonalDetails.basicPersonDetails.gender` | `stringval49` | M→`MALE`, F→`FEMALE` **(Fix 8)** | Confirmed |
+| 4 | `phPersonalDetails.basicPersonDetails.idProofDoc` | `stringval117` check | `"AADHAR_REFERENCE_CODE"` or `"PAN"` **(Fix 8)** | Same Aadhar/PAN logic |
+| 5 | `phPersonalDetails.basicPersonDetails.idProofValue` | `stringval117` or `stringval122` | **(Fix 8)** | Confirmed |
+| 6 | `phPersonalDetails.basicPersonDetails.lastName` | **NOT MAPPED** | `null` | **TODO: Confirm source param — stringval47 is used for relationshipToIP** |
+| 7 | `phPersonalDetails.contactDetails.emailId` | `stringval20` | Wrapped in `EmailAddress` object **(Fix 1)** | Same as IP email — TODO: confirm if PH can have different |
+| 8 | `phPersonalDetails.contactDetails.mobileNumber` | `stringval19` | Wrapped in `PhoneNumber` object | Same as IP mobile |
+| 9 | `phEducationAndOccupationDetails.occupationDetails.annualIncome` | `stringval130` | — **(Fix 7)** | Null causes PAS rejection |
+| 10 | `phEducationAndOccupationDetails.occupationDetails.occupation` | `stringval133` | — | Confirmed |
+| 11 | `relationshipToIP` | `stringval47` | Default: `""` if null **(Fix 8)** | Null causes PAS rejection |
+| 12 | `currentAddress` | **NOT MAPPED** | `null` | **TODO: Identify address params** |
+| 13 | `permanentAddress` | **NOT MAPPED** | `null` | **TODO: Identify address params** |
+| 14 | `kycType` | **NOT MAPPED** | `null` | **TODO: Confirm if required** |
 
 ---
 
----
+#### 11k. payerDetails
+*(built in `buildPayerDetails(raw)`)*
 
-## Known Fixes Applied in Code (PasApiClient.java)
-
-| Fix # | Issue | Resolution | Affected Fields |
-|-------|-------|------------|-----------------|
-| Fix 1 | Email passed as bare String — PAS rejected the request | Wrapped in `EmailAddress` object before setting on `ContactDetails` | `contactDetails.emailId` in IP, PH, and Payer |
-| Fix 2 | ID proof logic not implemented | If `stringval117` (Aadhar) non-blank → use `AADHAR_REFERENCE_CODE`; else fall back to `stringval122` (PAN) | `policyInsuredLegalIdentifierCode/Value`, `idProofDoc/Value` |
-| Fix 3 | PAS requires full gender string, not single character | Mapped `M` → `MALE`, `F` → `FEMALE` | IP gender in basicPolicyInsured and ipBasicDetails |
-| Fix 4 | PAS requires full marital status string | Mapped `M`→`MARRIED`, `S`→`SINGLE`, `D`→`DIVORCED`, `W`→`WIDOWED` | `ipBasicDetails.maritalStatus` |
-| Fix 5 | Lifestyle flags were `null` — PAS rejected | Defaulted all to `false` instead of null | All 6 boolean flags in `habbitDetailsDTO` |
-| Fix 6 | Payer gender was not being mapped from `"M"`/`"F"` | Applied `mapGender()` to `stringval49` for payer | `payerBasicDetails.gender` |
-| Fix 7 | `annualIncome` in PH occupation was null — PAS rejected | Explicitly set from `stringval130` | `phEducationAndOccupationDetails.occupationDetails.annualIncome` |
-| Fix 8 | PH gender not mapped; `relationshipToIP` was null (PAS rejected); PH ID proof missing | Gender mapped; `relationshipToIP` defaults to `""` (empty string); Aadhar-or-PAN logic applied | `phBasicDetails.gender`, `phDetails.relationshipToIP`, `phBasicDetails.idProofDoc/Value` |
-| Fix 9 | `ppt` was null; `riderDetails` was null — PAS rejected both | `ppt` hardcoded to `0`; `riderDetails` set to `new ArrayList<>()` | `productDetailsDTO.ppt`, `productDetailsDTO.riderDetails` |
+| # | PAS Field Path | InboundRequest Param / Source | Transformation / Fix | BA Comment |
+|---|----------------|-------------------------------|----------------------|------------|
+| 1 | `payerPersonalDetails.basicPersonDetails.gender` | `stringval49` | M→`MALE`, F→`FEMALE` **(Fix 6)** | PH gender used for payer |
+| 2 | `payerPersonalDetails.contactDetails.emailId` | `stringval20` | Wrapped in `EmailAddress` object **(Fix 1)** | Same email as IP/PH |
+| 3 | `payerPersonalDetails.contactDetails.mobileNumber` | `stringval19` | Wrapped in `PhoneNumber` object | Same mobile as IP/PH |
+| 4 | `payerPersonalDetails.basicPersonDetails.firstName` | **NOT MAPPED** | `null` | **TODO: Is payer always same as PH? Confirm** |
+| 5 | `payerPersonalDetails.basicPersonDetails.dateOfBirth` | **NOT MAPPED** | `null` | **TODO: Confirm payer DOB source** |
 
 ---
 
-## Open Items / Pending Actions
+#### 11l. productDetailsDTO
+*(built in `buildProductDetails(context, raw)` — **Fix 9**)*
 
-| # | API | Open Item | Owner | Priority |
-|---|-----|-----------|-------|---------|
-| 1 | KYC_API | Full KYC API contract not implemented — `KycRequest.java` has only placeholder fields | BA + Dev | High |
-| 2 | DOCUMENT_API | Full DOCUMENT_API contract not implemented — only `correlationId`, `productCode`, `applicantName` stubbed | BA + Dev | High |
-| 3 | PROPOSAL_SUBMIT_API | `applicantName` source param not confirmed — is it stringval1 + stringval2, or a separate field? | BA | Medium |
-| 4 | PAS productSelection | `branchCode`, `policyIssueState`, `productPlan` source params not mapped | BA + Dev | High |
-| 5 | PAS bankDetailsDTO | Empty object sent — does PAS require bank details for submission? | BA | High |
-| 6 | PAS journeyDetails | Empty object sent — does PAS require journey details? | BA | Medium |
-| 7 | PAS habbitDetailsDTO | `isSmoker`, `isAlcohol`, `isTobacco` are hardcoded to `false` — should these come from stringval70/71? | BA | Medium |
-| 8 | PAS habbitDetailsDTO | `height`, `weight`, `bmi` are null — does PAS require them? (available as stringval73, stringval74) | BA | Medium |
-| 9 | PAS ipDetails | `currentAddress`, `permanentAddress`, `kycType`, `ipEducationAndOccupationDetails` all null | BA + Dev | High |
-| 10 | PAS phDetails | PH `lastName` source param not identified (`stringval47` is `relationshipToIP`) | BA | High |
-| 11 | PAS phDetails | `currentAddress`, `permanentAddress`, `kycType` all null | BA + Dev | High |
-| 12 | PAS payerDetails | Payer firstName, DOB not mapped — is payer always the same person as PH? | BA | High |
-| 13 | PAS productDetailsDTO | `productName`, `optionOrVariant`, `coverage`, `fundDetails` not mapped | BA + Dev | Medium |
-| 14 | REVERSE_FEED_API | Full reverse feed payload contract not defined — only `correlationId` and `applicationNumber` sent | BA + Dev | High |
-| 15 | REVERSE_FEED_API | BASIC auth not implemented in `buildAuthHeaders()` | Dev | Low |
-| 16 | ELIGIBILITY_API | On retry, `eligibilityResult` is not reloaded from DB — later stages that need it will fail on retry | Dev | High |
-| 17 | SCORING_API | TODO in code: enrich `ScoringRequest` from `eligibilityResult` if EDC/PASA/TASA need it | BA + Dev | Medium |
-| 18 | KYC_API | TODO in code: enrich `KycRequest` from prior stages (e.g. `eligibilityId`) | Dev | Medium |
+| # | PAS Field | Source | Value / Param | BA Comment |
+|---|-----------|--------|---------------|------------|
+| 1 | `premiumAmount` | **ENRICHED** | `PremiumResponse.calculatedPremium` (as String) | From Stage 5 |
+| 2 | `premFrequency` | **ENRICHED** | `PremiumResponse.frequency` | From Stage 5 |
+| 3 | `ppt` | **HARDCODED** | `0` **(Fix 9)** | PAS rejects null |
+| 4 | `riderDetails` | **HARDCODED** | `[]` empty list **(Fix 9)** | PAS rejects null |
+| 5 | `productName` | **NOT MAPPED** | `null` | **TODO: Source param not identified** |
+| 6 | `optionOrVariant` | **NOT MAPPED** | `null` | **TODO: Source param not identified** |
+| 7 | `coverage` | **NOT MAPPED** | `null` | **TODO: Source param not identified** |
+| 8 | `fundDetails` | **NOT MAPPED** | `null` | **TODO: Required for ULIP products?** |
+
+---
+
+## 5. Applied Fixes Reference (PasApiClient.java)
+
+| Fix # | Problem | Code Fix | Affected PAS Fields |
+|-------|---------|----------|-------------------|
+| Fix 1 | Email sent as bare String — PAS rejected | Wrap in `EmailAddress` object before setting on `ContactDetails` | `contactDetails.emailId` in IP, PH, Payer |
+| Fix 2 | No ID proof logic | If `stringval117` (Aadhar) non-blank → `AADHAR_REFERENCE_CODE`; else `PAN` from `stringval122` | `policyInsuredLegalIdentifierCode/Value`, `idProofDoc/Value` |
+| Fix 3 | PAS needs full gender string, not `"M"` / `"F"` | `M`→`MALE`, `F`→`FEMALE` in `mapGender()` | IP gender in basicPolicyInsured and ipBasicDetails |
+| Fix 4 | PAS needs full marital status string | `M`→`MARRIED`, `S`→`SINGLE`, `D`→`DIVORCED`, `W`→`WIDOWED` in `mapMaritalStatus()` | `ipBasicDetails.maritalStatus` |
+| Fix 5 | Lifestyle boolean flags were `null` — PAS rejected | Default all to `false` in `buildHabbitDetails()` | All 6 boolean flags in `habbitDetailsDTO` |
+| Fix 6 | Payer gender not mapped from `"M"`/`"F"` | Apply `mapGender()` to `stringval49` for payer | `payerBasicDetails.gender` |
+| Fix 7 | PH `annualIncome` was `null` — PAS rejected | Explicitly set from `stringval130` | `phOccupationDetails.annualIncome` |
+| Fix 8 | PH gender not mapped; `relationshipToIP` null causes rejection; PH ID proof missing | Gender mapped; `relationshipToIP` defaults to `""` (not null); Aadhar-or-PAN logic added | `phBasicDetails.gender`, `phDetails.relationshipToIP`, `phBasicDetails.idProofDoc/Value` |
+| Fix 9 | `ppt` null causes rejection; `riderDetails` null causes rejection | `ppt = 0`; `riderDetails = new ArrayList<>()` | `productDetailsDTO.ppt`, `productDetailsDTO.riderDetails` |
+
+---
+
+## 6. Open Items — Pending Mapping Actions
+
+| # | API | Open Item | BA Action | Dev Action | Priority |
+|---|-----|-----------|-----------|------------|---------|
+| 1 | KYC_API | Full API contract not defined — `KycRequest` has only placeholder fields | Get contract, confirm all field params | Fill KycRequest/KycResponse | **High** |
+| 2 | DOCUMENT_API | Contract not defined — only `correlationId` explicitly set | Get contract, confirm fields | Fill DocumentRequest/DocumentResponse | **High** |
+| 3 | PROPOSAL_SUBMIT_API | `applicantName` source not confirmed | Confirm: is it stringval1+stringval2 or separate param? | — | Medium |
+| 4 | PAS productSelection | `branchCode`, `policyIssueState`, `productPlan` have no source param | Identify source stringvalN for each | Add to `buildPasRequest()` | **High** |
+| 5 | PAS bankDetailsDTO | Sent as empty object — PAS may require bank fields | Confirm if bank details needed for submission | Implement if needed | **High** |
+| 6 | PAS journeyDetails | Sent as empty object | Confirm required fields with PAS team | Implement if needed | Medium |
+| 7 | PAS habbitDetailsDTO | `isSmoker`, `isAlcohol`, `isTobacco` hardcoded `false` — should they come from stringval70/71? | Confirm business rule — should partner-sent values override defaults? | Map from stringval70/71 if yes | Medium |
+| 8 | PAS habbitDetailsDTO | `height`, `weight`, `bmi` are null | Confirm if PAS needs these (already sent to Medical via stringval73/74) | Map if needed | Medium |
+| 9 | PAS ipDetails | `currentAddress`, `permanentAddress`, `kycType`, `ipEducationAndOccupationDetails` all null | Identify source params for address and IP occupation | Implement in `buildIpDetails()` | **High** |
+| 10 | PAS phDetails | PH `lastName` has no source param (`stringval47` = relationshipToIP) | Identify correct stringvalN for PH last name | Add to `buildPhDetails()` | **High** |
+| 11 | PAS phDetails | `currentAddress`, `permanentAddress`, `kycType` all null | Identify source params | Implement in `buildPhDetails()` | **High** |
+| 12 | PAS payerDetails | Payer firstName, DOB not mapped — is payer always same as PH? | Confirm payer = PH or separate person | Map if separate | **High** |
+| 13 | PAS productDetailsDTO | `productName`, `optionOrVariant`, `coverage`, `fundDetails` null | Identify source params | Map in `buildProductDetails()` | Medium |
+| 14 | ELIGIBILITY_API | On retry, `eligibilityResult` not reloaded from DB — downstream stages fail | — | Add reload from `journey_stage_log` on retry | **High** |
+| 15 | SCORING_API | Orchestrator has TODO: enrich `ScoringRequest` from `eligibilityResult` if needed | Confirm if EDC/PASA/TASA need eligibility fields | Implement enrichment | Medium |
+| 16 | KYC_API | Orchestrator has TODO: enrich `KycRequest` from prior stages | Confirm if KYC needs `eligibilityId` or other outputs | Implement enrichment | Medium |
